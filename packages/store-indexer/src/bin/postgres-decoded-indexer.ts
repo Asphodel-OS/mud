@@ -85,6 +85,7 @@ combineLatest([latestBlockNumber$, storedBlockLogs$])
 if (env.HEALTHCHECK_HOST != null || env.HEALTHCHECK_PORT != null) {
   const { default: Koa } = await import("koa");
   const { default: cors } = await import("@koa/cors");
+  const { logsLive } = await import("../koa-middleware/logsLive");
 
   const server = new Koa();
 
@@ -93,6 +94,7 @@ if (env.HEALTHCHECK_HOST != null || env.HEALTHCHECK_PORT != null) {
   }
 
   server.use(cors());
+  server.use(logsLive({ storedBlockLogs$ }));
   server.use(
     healthcheck({
       isReady: () => isCaughtUp,

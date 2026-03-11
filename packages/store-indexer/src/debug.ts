@@ -1,10 +1,13 @@
-import createDebug from "debug";
+type Logger = {
+  (...args: unknown[]): void;
+  extend: (suffix: string) => Logger;
+};
 
-export const debug = createDebug("mud:store-indexer");
-export const error = createDebug("mud:store-indexer");
+const createLogger = (prefix: string): Logger => {
+  const log = (...args: unknown[]): void => console.log(`[${prefix}]`, ...args);
+  log.extend = (suffix: string): Logger => createLogger(`${prefix}:${suffix}`);
+  return log;
+};
 
-// Pipe debug output to stdout instead of stderr
-debug.log = console.debug.bind(console);
-
-// Pipe error output to stderr
-error.log = console.error.bind(console);
+export const debug = createLogger("mud:store-indexer");
+export const error = (...args: unknown[]): void => console.error("[mud:store-indexer]", ...args);

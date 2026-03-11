@@ -16,6 +16,7 @@ import { combineLatest, filter, first } from "rxjs";
 import { frontendEnvSchema, indexerEnvSchema, parseEnv } from "./parseEnv";
 import { healthcheck } from "../koa-middleware/healthcheck";
 import { helloWorld } from "../koa-middleware/helloWorld";
+import { logsLive } from "../koa-middleware/logsLive";
 import { apiRoutes } from "../sqlite/apiRoutes";
 import { sentry } from "../koa-middleware/sentry";
 import { metrics } from "../koa-middleware/metrics";
@@ -127,6 +128,7 @@ if (env.SENTRY_DSN) {
 }
 
 server.use(cors());
+server.use(logsLive({ storedBlockLogs$ }));
 server.use(bodyParser());
 server.use(
   healthcheck({

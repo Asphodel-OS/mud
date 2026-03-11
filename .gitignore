@@ -33,3 +33,6 @@ test-data/world-logs-query.json
 # sqlite indexer data
 *.db
 *.db-journal
+
+tmp
+.serena

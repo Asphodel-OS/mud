@@ -1,9 +1,1 @@
-# These owners will be the default owners for everything in
-# the repo. Unless a later match takes precedence.
-
-* @alvrs @holic
-
-/docs @ludns @alvrs @holic
-
-/packages/explorer @alvrs @holic @karooolis
-/examples/local-explorer @alvrs @holic @karooolis
+@hubur

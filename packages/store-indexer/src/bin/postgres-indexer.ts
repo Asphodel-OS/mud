@@ -102,10 +102,12 @@ if (env.HEALTHCHECK_HOST != null || env.HEALTHCHECK_PORT != null) {
   const { healthcheck } = await import("../koa-middleware/healthcheck");
   const { metrics } = await import("../koa-middleware/metrics");
   const { helloWorld } = await import("../koa-middleware/helloWorld");
+  const { logsLive } = await import("../koa-middleware/logsLive");
 
   const server = new Koa();
 
   server.use(cors());
+  server.use(logsLive({ storedBlockLogs$ }));
   server.use(
     healthcheck({
       isReady: () => isCaughtUp,

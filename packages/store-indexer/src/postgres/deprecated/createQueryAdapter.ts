@@ -46,7 +46,7 @@ export async function createQueryAdapter(database: PgDatabase<any>): Promise<Que
         };
       });
 
-      debug("findAll: decoded %d logs across %d tables", logs.length, tables.length);
+      debug(`findAll: decoded ${logs.length} logs across ${tables.length} tables`);
 
       return {
         blockNumber,

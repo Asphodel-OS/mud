@@ -34,6 +34,10 @@ export function apiRoutes({ database, enableUnsafeQueryApi = false }: Props): Mi
       return;
     }
 
+    debug(
+      `request received (chainId=${options.chainId}, address=${options.address}, filters=${options.filters.length})`,
+    );
+
     try {
       options.filters = options.filters.length > 0 ? [...options.filters, { tableId: schemasTable.tableId }] : [];
       benchmark("parse config");
@@ -42,12 +46,13 @@ export function apiRoutes({ database, enableUnsafeQueryApi = false }: Props): Mi
       const logs = tablesWithRecordsToLogs(tables);
       benchmark("convert records to logs");
 
+      debug(`response ok (blockNumber=${blockNumber?.toString() ?? "-1"}, logs=${logs.length})`);
       ctx.body = JSON.stringify({ blockNumber: blockNumber?.toString() ?? "-1", logs });
       ctx.status = 200;
     } catch (error) {
+      debug("request failed:", error);
       ctx.status = 500;
       ctx.body = JSON.stringify(error);
-      debug(error);
     }
   });
 

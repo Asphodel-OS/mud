@@ -31,7 +31,7 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
       }
       parsedInput = input.parse(JSON.parse(rawInput));
     } catch (e) {
-      error("invalid input parameter: %s", e instanceof Error ? e.message : String(e));
+      error(`invalid input parameter: ${e instanceof Error ? e.message : String(e)}`);
       ctx.status = 400;
       ctx.type = "application/json";
       ctx.body = JSON.stringify({
@@ -60,7 +60,7 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
 
     const { address, filters } = parsedInput;
 
-    debug("client connected (address=%s, filters=%d, fromBlock=%s)", address ?? "*", filters.length, blockNum);
+    debug(`client connected (address=${address ?? "*"}, filters=${filters.length}, fromBlock=${blockNum})`);
 
     ctx.respond = false;
     ctx.res.writeHead(200, {
@@ -83,7 +83,7 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
     }
 
     ctx.req.once("close", () => {
-      debug("client disconnected (address=%s)", address ?? "*");
+      debug(`client disconnected (address=${address ?? "*"})`);
       cleanup();
     });
 
@@ -118,11 +118,11 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
           blockNumber: block.blockNumber.toString(),
           logs,
         };
-        debug("emitting block %s with %d logs (address=%s)", block.blockNumber, logs.length, address ?? "*");
+        debug(`emitting block ${block.blockNumber} with ${logs.length} logs (address=${address ?? "*"})`);
         ctx.res.write(`data: ${bigIntSafeStringify(frame)}\n\n`);
       },
       error: (err) => {
-        error("stream error (address=%s): %O", address ?? "*", err);
+        error(`stream error (address=${address ?? "*"}):`, err);
         ctx.res.end();
         cleanup();
       },

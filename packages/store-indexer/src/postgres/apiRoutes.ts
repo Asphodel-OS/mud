@@ -27,6 +27,10 @@ export function apiRoutes(database: Sql): Middleware {
       return;
     }
 
+    debug(
+      `request received (chainId=${options.chainId}, address=${options.address}, filters=${options.filters.length})`,
+    );
+
     try {
       options.filters = options.filters.length > 0 ? [...options.filters, { tableId: schemasTable.tableId }] : [];
       const records = await queryLogs(database, options ?? {}).execute();
@@ -68,8 +72,10 @@ export function apiRoutes(database: Sql): Middleware {
       );
 
       ctx.set("Content-Type", "application/json");
+      debug(`response ok (blockNumber=${blockNumber}, logs=${logs.length})`);
       ctx.body = JSON.stringify({ blockNumber, logs });
     } catch (e) {
+      debug("request failed:", e);
       ctx.status = 500;
       ctx.set("Content-Type", "application/json");
       ctx.body = JSON.stringify(e);

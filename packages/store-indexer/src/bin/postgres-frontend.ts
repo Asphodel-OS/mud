@@ -14,6 +14,8 @@ import { sentry } from "../koa-middleware/sentry";
 import { healthcheck } from "../koa-middleware/healthcheck";
 import { helloWorld } from "../koa-middleware/helloWorld";
 import { metrics } from "../koa-middleware/metrics";
+import { logsLive } from "../koa-middleware/logsLive";
+import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
 
 const env = parseEnv(
   z.intersection(
@@ -21,11 +23,17 @@ const env = parseEnv(
     z.object({
       DATABASE_URL: z.string(),
       SENTRY_DSN: z.string().optional(),
+      POLLING_INTERVAL: z.coerce.number().positive().default(1000),
     }),
   ),
 );
 
 const database = postgres(env.DATABASE_URL, { prepare: false });
+
+const storedBlockLogs$ = createBlockLogsStream({
+  sql: database,
+  pollingIntervalMs: env.POLLING_INTERVAL,
+});
 
 const server = new Koa();
 
@@ -34,6 +42,7 @@ if (env.SENTRY_DSN) {
 }
 
 server.use(cors());
+server.use(logsLive({ storedBlockLogs$ }));
 server.use(healthcheck());
 server.use(
   metrics({

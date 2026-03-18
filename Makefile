@@ -16,9 +16,9 @@ indexer-build:
 ECR_REPO := 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/test/mud-indexer
 
 publish-indexer-test:
-	docker build --target store-indexer -t $(ECR_REPO):indexer-latest .
+	docker tag mud-indexer $(ECR_REPO):indexer-latest
 	docker push $(ECR_REPO):indexer-latest
 
 publish-frontend-test:
-	docker build --target store-indexer -t $(ECR_REPO):frontend-latest .
+	docker tag mud-frontend $(ECR_REPO):frontend-latest
 	docker push $(ECR_REPO):frontend-latest

@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mud
+      POSTGRES_PASSWORD: mud
+      POSTGRES_DB: mud
+    volumes:
+      - indexer-pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mud"]
+      interval: 5s
+      retries: 5
+
+  indexer:
+    build:
+      context: .
+      target: store-indexer
+    command: pnpm tsx src/bin/postgres-decoded-indexer.ts
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://mud:mud@db:5432/mud"
+      RPC_HTTP_URL: "${RPC_HTTP_URL}"
+      STORE_ADDRESS: "${STORE_ADDRESS}"
+      START_BLOCK: "${START_BLOCK}"
+      FOLLOW_BLOCK_TAG: "latest"
+      MAX_BLOCK_RANGE: "1000"
+      POLLING_INTERVAL: "1000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      target: store-indexer
+    command: pnpm tsx src/bin/postgres-frontend.ts
+    depends_on:
+      db:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    environment:
+      DATABASE_URL: "postgres://mud:mud@db:5432/mud"
+      HOST: "0.0.0.0"
+      PORT: "1337"
+    ports:
+      - "1337:1337"
+    restart: unless-stopped
+
+volumes:
+  indexer-pgdata:

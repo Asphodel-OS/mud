@@ -22,6 +22,9 @@ indexer-dev-down:
 indexer-dev-logs:
 	docker compose -f docker-compose.indexer.yml -f docker-compose.dev.yml --env-file .env.test logs -f
 
+db-reset:                                                
+	docker compose -f docker-compose.indexer.yml down -v
+
 ECR_REPO := 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/test/mud-indexer
 
 publish-indexer-test:

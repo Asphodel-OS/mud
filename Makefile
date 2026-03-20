@@ -34,3 +34,6 @@ publish-indexer-test:
 publish-frontend-test:
 	docker tag mud-frontend $(ECR_REPO):frontend-latest
 	docker push $(ECR_REPO):frontend-latest
+
+vendor-indexer:
+	./scripts/vendor-indexer.sh

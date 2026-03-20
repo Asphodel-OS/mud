@@ -7,6 +7,7 @@ import { createKoaMiddleware } from "trpc-koa-adapter";
 import { createAppRouter } from "@latticexyz/store-sync/trpc-indexer";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import bodyParser from "koa-bodyparser";
 import { frontendEnvSchema, parseEnv } from "./parseEnv";
 import { createQueryAdapter } from "../postgres/deprecated/createQueryAdapter";
 import { apiRoutes } from "../postgres/apiRoutes";
@@ -24,6 +25,7 @@ const env = parseEnv(
       DATABASE_URL: z.string(),
       SENTRY_DSN: z.string().optional(),
       POLLING_INTERVAL: z.coerce.number().positive().default(1000),
+      QUERY_API_KEY: z.string().optional(),
     }),
   ),
 );
@@ -51,7 +53,8 @@ server.use(
   }),
 );
 server.use(helloWorld());
-server.use(apiRoutes(database));
+server.use(bodyParser());
+server.use(apiRoutes({ database, queryApiKey: env.QUERY_API_KEY }));
 
 server.use(
   createKoaMiddleware({
@@ -65,3 +68,12 @@ server.use(
 
 server.listen({ host: env.HOST, port: env.PORT });
 console.log(`postgres indexer frontend listening on http://${env.HOST}:${env.PORT}`);
+
+if (env.QUERY_API_KEY) {
+  console.warn("\n\n⚠️  SECURITY WARNING ⚠️");
+  console.warn("=========================\n");
+  console.warn("QUERY API ENDPOINT IS ENABLED (POST /q)");
+  console.warn("This exposes raw SQL query execution behind an API key.");
+  console.warn("Ensure QUERY_API_KEY is strong and rotated regularly.");
+  console.warn("\n=========================\n\n");
+}

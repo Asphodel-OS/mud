@@ -9,8 +9,14 @@ import { recordToLog } from "./recordToLog";
 import { debug, error } from "../debug";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
+import { formatSqlQuery } from "./formatSqlQuery";
 
-export function apiRoutes(database: Sql): Middleware {
+type Props = {
+  database: Sql;
+  queryApiKey?: string;
+};
+
+export function apiRoutes({ database, queryApiKey }: Props): Middleware {
   const router = new Router();
 
   router.get("/api/logs", compress(), async (ctx) => {
@@ -80,6 +86,61 @@ export function apiRoutes(database: Sql): Middleware {
       ctx.set("Content-Type", "application/json");
       ctx.body = JSON.stringify(e);
       error(e);
+    }
+  });
+
+  router.post("/q", async (ctx) => {
+    ctx.set("Content-Type", "application/json");
+
+    if (!queryApiKey) {
+      ctx.status = 404;
+      ctx.body = JSON.stringify({ error: "Query endpoint is not enabled" });
+      return;
+    }
+
+    if (ctx.get("x-api-key") !== queryApiKey) {
+      ctx.status = 401;
+      ctx.body = JSON.stringify({ error: "Invalid API key" });
+      return;
+    }
+
+    try {
+      const queries = Array.isArray(ctx.request.body) ? ctx.request.body : [];
+      if (queries.length === 0) {
+        ctx.status = 400;
+        ctx.body = JSON.stringify({ error: "No queries provided" });
+        return;
+      }
+
+      const result = [];
+      for (const entry of queries) {
+        if (!entry || typeof entry !== "object" || typeof entry.query !== "string") {
+          ctx.status = 400;
+          ctx.body = JSON.stringify({ error: "Each query must be an object with a 'query' string property" });
+          return;
+        }
+
+        const formattedQuery = formatSqlQuery(entry.query);
+        const data = await database.unsafe(formattedQuery);
+
+        if (data.length === 0) {
+          result.push([]);
+          continue;
+        }
+
+        const columns = Object.keys(data[0]).map((key) => key.replaceAll("_", "").toLowerCase());
+        const rows = data.map((row: Record<string, unknown>) =>
+          Object.values(row).map((value) => value?.toString() ?? ""),
+        );
+        result.push([columns, ...rows]);
+      }
+
+      ctx.status = 200;
+      ctx.body = JSON.stringify({ result });
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred";
+      ctx.status = 400;
+      ctx.body = JSON.stringify({ error: errorMessage });
     }
   });
 

@@ -1,0 +1,10 @@
+services:
+  indexer:
+    command: pnpm tsx --watch src/bin/postgres-decoded-indexer.ts
+    volumes:
+      - ./packages/store-indexer/src:/app/packages/store-indexer/src
+
+  frontend:
+    command: pnpm tsx --watch src/bin/postgres-frontend.ts
+    volumes:
+      - ./packages/store-indexer/src:/app/packages/store-indexer/src

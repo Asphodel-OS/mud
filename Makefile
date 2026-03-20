@@ -13,6 +13,15 @@ indexer-prod-down:
 indexer-build:
 	docker compose -f docker-compose.indexer.yml build
 
+indexer-dev-up:
+	docker compose -f docker-compose.indexer.yml -f docker-compose.dev.yml --env-file .env.test up -d
+
+indexer-dev-down:
+	docker compose -f docker-compose.indexer.yml -f docker-compose.dev.yml --env-file .env.test down
+
+indexer-dev-logs:
+	docker compose -f docker-compose.indexer.yml -f docker-compose.dev.yml --env-file .env.test logs -f
+
 ECR_REPO := 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/test/mud-indexer
 
 publish-indexer-test:

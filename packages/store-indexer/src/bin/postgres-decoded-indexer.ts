@@ -14,6 +14,7 @@ import { helloWorld } from "../koa-middleware/helloWorld";
 import { getClientOptions } from "./getClientOptions";
 import { getChainId } from "viem/actions";
 import { getRpcClient } from "@latticexyz/block-logs-stream";
+import { createRevealHookAdapter } from "../sqs-reveal-hook";
 
 const env = parseEnv(
   z.intersection(
@@ -23,6 +24,7 @@ const env = parseEnv(
       HEALTHCHECK_HOST: z.string().optional(),
       HEALTHCHECK_PORT: z.coerce.number().optional(),
       SENTRY_DSN: z.string().optional(),
+      SQS_QUEUE_URL: z.string().optional(),
     }),
   ),
 );
@@ -33,6 +35,12 @@ const chainId = await getChainId(getRpcClient(clientOptions));
 const database = drizzle(postgres(env.DATABASE_URL, { prepare: false }));
 
 const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
+
+const finalAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(storageAdapter, env.SQS_QUEUE_URL) : storageAdapter;
+
+if (env.SQS_QUEUE_URL) {
+  console.log(`[sqs-reveal-hook] enabled, queue: ${env.SQS_QUEUE_URL}`);
+}
 
 let startBlock = env.START_BLOCK;
 
@@ -59,7 +67,7 @@ try {
 
 const { latestBlockNumber$, storedBlockLogs$ } = await createStoreSync({
   ...clientOptions,
-  storageAdapter,
+  storageAdapter: finalAdapter,
   followBlockTag: env.FOLLOW_BLOCK_TAG,
   startBlock,
   maxBlockRange: env.MAX_BLOCK_RANGE,

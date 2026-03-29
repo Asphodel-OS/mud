@@ -63,7 +63,7 @@ export function createRevealHookAdapter(inner: StorageAdapter, sqsQueueUrl: stri
         );
         console.log(`[sqs-reveal-hook] pushed reveal code=${code} at block ${block.blockNumber}`);
       } catch (error) {
-        console.error(`[sqs-reveal-hook] failed to push code=${code}:`, error);
+        console.error(`[sqs-reveal-hook] failed to push code=${code} at block ${block.blockNumber}:`, error);
       }
     }
   };

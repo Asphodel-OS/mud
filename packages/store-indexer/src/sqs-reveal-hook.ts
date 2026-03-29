@@ -1,6 +1,7 @@
 import { Hex, sliceHex, hexToBigInt, hexToNumber } from "viem";
 import { resourceToHex } from "@latticexyz/common";
-import { StorageAdapterLog } from "@latticexyz/store-sync";
+import { StorageAdapterLog, StorageAdapter, StorageAdapterBlock } from "@latticexyz/store-sync";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
 const TARUCHI_STATUS_TABLE_ID = resourceToHex({
   type: "table",
@@ -43,4 +44,27 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
   }
 
   return codes;
+}
+
+export function createRevealHookAdapter(inner: StorageAdapter, sqsQueueUrl: string): StorageAdapter {
+  const sqs = new SQSClient({});
+
+  return async (block: StorageAdapterBlock): Promise<void> => {
+    await inner(block);
+
+    const codes = extractRevealCodes(block.logs);
+    for (const code of codes) {
+      try {
+        await sqs.send(
+          new SendMessageCommand({
+            QueueUrl: sqsQueueUrl,
+            MessageBody: JSON.stringify({ code }),
+          }),
+        );
+        console.log(`[sqs-reveal-hook] pushed reveal code=${code} at block ${block.blockNumber}`);
+      } catch (error) {
+        console.error(`[sqs-reveal-hook] failed to push code=${code}:`, error);
+      }
+    }
+  };
 }

@@ -30,6 +30,7 @@ services:
       FOLLOW_BLOCK_TAG: "latest"
       MAX_BLOCK_RANGE: "1000"
       POLLING_INTERVAL: "1000"
+      SQS_QUEUE_URL: "${SQS_QUEUE_URL:-}"
     restart: unless-stopped
 
   frontend:

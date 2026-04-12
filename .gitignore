@@ -36,3 +36,6 @@ test-data/world-logs-query.json
 
 tmp
 .serena
+
+.omc
+docs/superpowers/

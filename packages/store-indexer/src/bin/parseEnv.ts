@@ -8,7 +8,7 @@ export const frontendEnvSchema = z.object({
 
 export const indexerEnvSchema = z.intersection(
   z.object({
-    FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("safe"),
+    FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("latest"),
     START_BLOCK: z.coerce.bigint().nonnegative().default(0n),
     MAX_BLOCK_RANGE: z.coerce.bigint().positive().default(1000n),
     POLLING_INTERVAL: z.coerce.number().positive().default(1000),
@@ -21,6 +21,11 @@ export const indexerEnvSchema = z.intersection(
       .string()
       .optional()
       .transform((input) => input === "true" || input === "1"),
+    REORG_SAFE: z
+      .string()
+      .optional()
+      .transform((input) => input === "true" || input === "1"),
+    REORG_WINDOW: z.coerce.bigint().positive().default(64n),
   }),
   z.union([
     z.object({

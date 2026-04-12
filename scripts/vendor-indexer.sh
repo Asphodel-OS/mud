@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MUD_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-VENDOR_DIR="$(cd "$MUD_ROOT/../taruchi" && pwd)/vendor"
+VENDOR_DIR="$(cd "$MUD_ROOT/../prolog" && pwd)/vendor"
 
 echo "Building @latticexyz/store-indexer..."
 cd "$MUD_ROOT/packages/store-indexer"

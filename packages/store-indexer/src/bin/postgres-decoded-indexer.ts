@@ -41,7 +41,12 @@ logger.info("starting postgres-decoded-indexer", { version: packageJson.version 
 const clientOptions = await getClientOptions(env);
 const publicClient = getRpcClient(clientOptions);
 const chainId = await getChainId(publicClient);
-const database = drizzle(postgres(env.DATABASE_URL, { prepare: false }));
+const database = drizzle(
+  postgres(env.DATABASE_URL, {
+    prepare: false,
+    onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
+  }),
+);
 
 let isCaughtUp = false;
 let healthcheckStarted = false;

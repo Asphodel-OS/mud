@@ -30,7 +30,10 @@ const env = parseEnv(
   ),
 );
 
-const database = postgres(env.DATABASE_URL, { prepare: false });
+const database = postgres(env.DATABASE_URL, {
+  prepare: false,
+  onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
+});
 
 const storedBlockLogs$ = createBlockLogsStream({
   sql: database,

@@ -1,12 +1,15 @@
 import { PgDatabase, QueryResultHKT, pgSchema, varchar } from "drizzle-orm/pg-core";
 import { gt, sql } from "drizzle-orm";
-import { PublicClient } from "viem";
+import { Client } from "viem";
 import { getBlock } from "viem/actions";
 import { getStoredBlockHash } from "./blockCache";
 import { restoreFromRewindLog } from "./rewindLog";
 import { blockCacheTable, rewindLogTable } from "./reorgTables";
 import { tables as mudTables } from "@latticexyz/store-sync/postgres";
 import { isNotNull } from "@latticexyz/common/utils";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "reorg" });
 
 const schemata = pgSchema("information_schema").table("schemata", {
   schemaName: varchar("schema_name", { length: 64 }),
@@ -14,7 +17,7 @@ const schemata = pgSchema("information_schema").table("schemata", {
 
 export async function findCommonAncestor(
   db: PgDatabase<QueryResultHKT>,
-  publicClient: PublicClient,
+  publicClient: Client,
   fromBlock: bigint,
   maxDepth: bigint = 64n,
 ): Promise<bigint> {
@@ -28,7 +31,7 @@ export async function findCommonAncestor(
     const canonicalBlock = await getBlock(publicClient, { blockNumber });
     if (canonicalBlock.hash === storedHash) return blockNumber;
 
-    console.log(`[reorg] block ${blockNumber} hash mismatch: stored=${storedHash} canonical=${canonicalBlock.hash}`);
+    log.info("block hash mismatch", { blockNumber, storedHash, canonicalHash: canonicalBlock.hash });
     blockNumber--;
   }
 
@@ -40,10 +43,10 @@ export async function rollbackToBlock(
   targetBlock: bigint,
   opts?: { decoded?: boolean },
 ): Promise<void> {
-  console.log(`[reorg] rolling back to block ${targetBlock}`);
+  log.info("rolling back", { targetBlock });
 
   const entries = await restoreFromRewindLog(db, targetBlock);
-  console.log(`[reorg] restored ${entries.length} raw record snapshots`);
+  log.info("restored raw record snapshots", { count: entries.length, targetBlock });
 
   if (opts?.decoded !== false) {
     await deleteStaleDecodedRows(db, targetBlock);
@@ -53,7 +56,7 @@ export async function rollbackToBlock(
   await db.delete(blockCacheTable).where(gt(blockCacheTable.blockNumber, targetBlock)).execute();
   await db.update(mudTables.configTable).set({ blockNumber: targetBlock }).execute();
 
-  console.log(`[reorg] rollback complete, config reset to block ${targetBlock}`);
+  log.info("rollback complete", { targetBlock });
 }
 
 async function deleteStaleDecodedRows(db: PgDatabase<QueryResultHKT>, targetBlock: bigint): Promise<void> {
@@ -77,7 +80,7 @@ async function deleteStaleDecodedRows(db: PgDatabase<QueryResultHKT>, targetBloc
       await db.execute(
         sql.raw(`DELETE FROM "${schemaName}"."${tableName}" WHERE __last_updated_block_number > ${targetBlock}`),
       );
-      console.log(`[reorg] cleaned decoded table ${schemaName}.${tableName}`);
+      log.info("cleaned decoded table", { schema: schemaName, table: tableName });
     }
   }
 }

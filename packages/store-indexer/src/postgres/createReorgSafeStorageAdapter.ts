@@ -1,5 +1,5 @@
 import { PgDatabase, QueryResultHKT } from "drizzle-orm/pg-core";
-import { Address, Hex, PublicClient, encodePacked } from "viem";
+import { Address, Client, Hex, encodePacked } from "viem";
 import { getBlock } from "viem/actions";
 import { StorageAdapter, StorageAdapterBlock } from "@latticexyz/store-sync";
 import { setupTables } from "@latticexyz/store-sync/postgres";
@@ -8,11 +8,14 @@ import { snapshotRecords, pruneRewindLog } from "./rewindLog";
 import { reorgTables } from "./reorgTables";
 import { findCommonAncestor, rollbackToBlock } from "./reorgHandler";
 import { ReorgError } from "./ReorgError";
+import { logger } from "../logger";
+
+const log = logger.child({ component: "reorg" });
 
 export type ReorgSafeStorageAdapterOptions = {
   storageAdapter: StorageAdapter;
   database: PgDatabase<QueryResultHKT>;
-  publicClient: PublicClient;
+  publicClient: Client;
   reorgWindow?: bigint;
   decoded?: boolean;
 };
@@ -35,10 +38,7 @@ export async function createReorgSafeStorageAdapter({
     if (prevStoredHash && blockHash) {
       const blockHeader = await getBlock(publicClient, { blockNumber });
       if (blockHeader.parentHash !== prevStoredHash) {
-        console.log(
-          `[reorg] detected at block ${blockNumber}: ` +
-            `parentHash=${blockHeader.parentHash} != storedHash=${prevStoredHash}`,
-        );
+        log.warn("reorg detected", { blockNumber, parentHash: blockHeader.parentHash, storedHash: prevStoredHash });
 
         const commonAncestor = await findCommonAncestor(database, publicClient, blockNumber - 1n, reorgWindow);
 
@@ -85,7 +85,7 @@ function extractRecordKeys(logs: StorageAdapterBlock["logs"]): { address: Addres
         keys.push({
           address: log.address as Address,
           tableId: args.tableId as Hex,
-          keyBytes: encodePacked(["bytes32[]"], [keyTuple]),
+          keyBytes: encodePacked(["bytes32[]"], [args.keyTuple]),
         });
       }
     }

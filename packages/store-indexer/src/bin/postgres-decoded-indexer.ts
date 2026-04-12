@@ -20,6 +20,8 @@ import { createRevealHookAdapter } from "../sqs-reveal-hook";
 import { createReorgSafeStorageAdapter } from "../postgres/createReorgSafeStorageAdapter";
 import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
+import { logger } from "../logger";
+import packageJson from "../../package.json";
 
 const env = parseEnv(
   z.intersection(
@@ -33,6 +35,8 @@ const env = parseEnv(
     }),
   ),
 );
+
+logger.info("starting postgres-decoded-indexer", { version: packageJson.version });
 
 const clientOptions = await getClientOptions(env);
 const publicClient = getRpcClient(clientOptions);
@@ -53,7 +57,7 @@ async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Pr
       .then((rows) => rows.find(() => true));
 
     if (chainState?.blockNumber != null) {
-      console.log("resuming from block number", chainState.blockNumber + 1n);
+      logger.info("resuming from block", { blockNumber: chainState.blockNumber + 1n });
       return chainState.blockNumber + 1n;
     }
   } catch (error) {
@@ -78,10 +82,10 @@ async function startSync(): Promise<void> {
     : sqsAdapter;
 
   if (env.REORG_SAFE) {
-    console.log(`[reorg-safe] enabled, window: ${env.REORG_WINDOW} blocks`);
+    logger.info("reorg-safe enabled", { component: "reorg", window: env.REORG_WINDOW });
   }
   if (env.SQS_QUEUE_URL) {
-    console.log(`[sqs-reveal-hook] enabled, queue: ${env.SQS_QUEUE_URL}`);
+    logger.info("sqs-reveal-hook enabled", { component: "sqs", queue: env.SQS_QUEUE_URL });
   }
 
   const startBlock = await getStartBlock(tables.configTable);
@@ -104,7 +108,7 @@ async function startSync(): Promise<void> {
               await storeBlockHash(database, block.number, block.hash);
             }
           } catch (e) {
-            console.warn("[reorg-safe] failed to store block hash from stream", e);
+            logger.warn("failed to store block hash from stream", { component: "reorg", error: e });
           }
         }),
       )
@@ -124,7 +128,7 @@ async function startSync(): Promise<void> {
     )
     .subscribe(() => {
       isCaughtUp = true;
-      console.log("all caught up");
+      logger.info("all caught up");
     });
 
   if (!healthcheckStarted && (env.HEALTHCHECK_HOST != null || env.HEALTHCHECK_PORT != null)) {
@@ -145,9 +149,7 @@ async function startSync(): Promise<void> {
     server.use(helloWorld());
 
     server.listen({ host: env.HEALTHCHECK_HOST, port: env.HEALTHCHECK_PORT });
-    console.log(
-      `postgres indexer healthcheck server listening on http://${env.HEALTHCHECK_HOST}:${env.HEALTHCHECK_PORT}`,
-    );
+    logger.info("healthcheck server listening", { host: env.HEALTHCHECK_HOST, port: env.HEALTHCHECK_PORT });
   }
 
   return new Promise<void>((_, reject) => {
@@ -164,7 +166,7 @@ async function run(): Promise<void> {
       break;
     } catch (error) {
       if (error instanceof ReorgError) {
-        console.log(`[reorg] restarting sync from block ${error.commonAncestorBlock + 1n}`);
+        logger.info("restarting sync after reorg", { component: "reorg", blockNumber: error.commonAncestorBlock + 1n });
         continue;
       }
       throw error;
@@ -173,6 +175,6 @@ async function run(): Promise<void> {
 }
 
 run().catch((error) => {
-  console.error("Fatal error:", error);
+  logger.error("fatal error", { error });
   process.exit(1);
 });

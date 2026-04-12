@@ -23,6 +23,8 @@ import { metrics } from "../koa-middleware/metrics";
 import { getClientOptions } from "./getClientOptions";
 import { getRpcClient } from "@latticexyz/block-logs-stream";
 import { getBlock, getChainId } from "viem/actions";
+import { logger } from "../logger";
+import packageJson from "../../package.json";
 
 const env = parseEnv(
   z.intersection(
@@ -38,6 +40,8 @@ const env = parseEnv(
     }),
   ),
 );
+
+logger.info("starting sqlite-indexer", { version: packageJson.version });
 
 const clientOptions = await getClientOptions(env);
 
@@ -83,17 +87,14 @@ const currentChainState = await getCurrentChainState();
 if (currentChainState) {
   // Reset the db if the version changed
   if (currentChainState.schemaVersion != schemaVersion) {
-    console.log(
-      "schema version changed from",
-      currentChainState.schemaVersion,
-      "to",
-      schemaVersion,
-      "recreating database",
-    );
+    logger.info("schema version changed, recreating database", {
+      from: currentChainState.schemaVersion,
+      to: schemaVersion,
+    });
     fs.truncateSync(env.SQLITE_FILENAME);
   } else if (currentChainState.lastUpdatedBlockNumber != null) {
     // Resume from latest block stored in DB. This will throw if the DB doesn't exist yet, so we wrap in a try/catch and ignore the error.
-    console.log("resuming from block number", currentChainState.lastUpdatedBlockNumber + 1n);
+    logger.info("resuming from block", { blockNumber: currentChainState.lastUpdatedBlockNumber + 1n });
     startBlock = currentChainState.lastUpdatedBlockNumber + 1n;
   }
 }
@@ -118,7 +119,7 @@ combineLatest([latestBlockNumber$, storedBlockLogs$])
   )
   .subscribe(() => {
     isCaughtUp = true;
-    console.log("all caught up");
+    logger.info("all caught up");
   });
 
 const server = new Koa();
@@ -158,13 +159,8 @@ server.use(
 );
 
 server.listen({ host: env.HOST, port: env.PORT });
-console.log(`sqlite indexer frontend listening on http://${env.HOST}:${env.PORT}`);
+logger.info("sqlite indexer listening", { host: env.HOST, port: env.PORT });
 
 if (env.ENABLE_UNSAFE_QUERY_API) {
-  console.warn("\n\n⚠️  SECURITY WARNING ⚠️");
-  console.warn("=========================\n");
-  console.warn("UNSAFE QUERY API IS ENABLED");
-  console.warn("DO NOT USE IN PRODUCTION");
-  console.warn("This will expose your database to public access");
-  console.warn("\n=========================\n\n");
+  logger.warn("UNSAFE QUERY API IS ENABLED — do not use in production, database is publicly exposed");
 }

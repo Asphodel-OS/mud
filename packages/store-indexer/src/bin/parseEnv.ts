@@ -1,5 +1,6 @@
 import { Hex, isHex } from "viem";
 import { z, ZodError, ZodTypeAny } from "zod";
+import { logger } from "../logger";
 
 export const frontendEnvSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
@@ -45,7 +46,7 @@ export function parseEnv<TSchema extends ZodTypeAny>(envSchema: TSchema): z.infe
   } catch (error) {
     if (error instanceof ZodError) {
       const { ...invalidEnvVars } = error.format();
-      console.error(`\nMissing or invalid environment variables:\n\n  ${Object.keys(invalidEnvVars).join("\n  ")}\n`);
+      logger.error("missing or invalid environment variables", { vars: Object.keys(invalidEnvVars) });
       process.exit(1);
     }
     throw error;

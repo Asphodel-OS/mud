@@ -11,7 +11,10 @@ indexer-prod-down:
 	docker compose -f docker-compose.indexer.yml --env-file .env down
 
 indexer-build:
-	docker compose -f docker-compose.indexer.yml build
+	docker build --target store-indexer -t mud-indexer -t mud-frontend .
+
+indexer-build-nocache:
+	docker build --no-cache --target store-indexer -t mud-indexer -t mud-frontend .
 
 indexer-dev-up:
 	docker compose -f docker-compose.indexer.yml -f docker-compose.dev.yml --env-file .env.test up -d

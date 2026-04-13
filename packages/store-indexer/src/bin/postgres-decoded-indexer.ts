@@ -18,6 +18,7 @@ import { getChainId } from "viem/actions";
 import { getRpcClient } from "@latticexyz/block-logs-stream";
 import { createRevealHookAdapter } from "../sqs-reveal-hook";
 import { createReorgSafeStorageAdapter } from "../postgres/createReorgSafeStorageAdapter";
+import { createLoggingStorageAdapter } from "../createLoggingStorageAdapter";
 import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
 import { logger } from "../logger";
@@ -74,7 +75,8 @@ async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Pr
 async function startSync(): Promise<void> {
   const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
 
-  const sqsAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(storageAdapter, env.SQS_QUEUE_URL) : storageAdapter;
+  const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);
+  const sqsAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(loggingAdapter, env.SQS_QUEUE_URL) : loggingAdapter;
 
   const finalAdapter = env.REORG_SAFE
     ? await createReorgSafeStorageAdapter({

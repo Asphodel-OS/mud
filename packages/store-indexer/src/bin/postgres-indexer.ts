@@ -18,6 +18,7 @@ import { Block } from "viem";
 import { getBlock, getChainId } from "viem/actions";
 import { getRpcClient } from "@latticexyz/block-logs-stream";
 import { createReorgSafeStorageAdapter } from "../postgres/createReorgSafeStorageAdapter";
+import { createLoggingStorageAdapter } from "../createLoggingStorageAdapter";
 import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
 import { logger } from "../logger";
@@ -80,15 +81,17 @@ async function getDistanceFromFollowBlock(configTable: (typeof mudTables)["confi
 async function startSync(): Promise<void> {
   const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
 
+  const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);
+
   const finalAdapter = env.REORG_SAFE
     ? await createReorgSafeStorageAdapter({
-        storageAdapter,
+        storageAdapter: loggingAdapter,
         database,
         publicClient,
         reorgWindow: env.REORG_WINDOW,
         decoded: false,
       })
-    : storageAdapter;
+    : loggingAdapter;
 
   if (env.REORG_SAFE) {
     logger.info("reorg-safe enabled", { component: "reorg", window: env.REORG_WINDOW });

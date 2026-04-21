@@ -6,8 +6,10 @@ import { decodeDynamicField } from "@latticexyz/protocol-parser/internal";
 import { Hex } from "viem";
 import { recordToLog } from "./recordToLog";
 import { debug as parentDebug } from "../debug";
+import { logger } from "../logger";
 
 const debug = parentDebug.extend("block-logs-stream");
+const log = logger.child({ component: "block-logs-stream" });
 const schemaName = transformSchemaName("mud");
 
 type CreateBlockLogsStreamOptions = {
@@ -104,7 +106,9 @@ export function createBlockLogsStream({
           subscriber.next({ blockNumber: latestBlockNumber, logs: [] });
         } else {
           for (const [blockNum, rows] of blockMap) {
-            subscriber.next({ blockNumber: blockNum, logs: rows.map(rowToLog) });
+            const logs = rows.map(rowToLog);
+            log.info("emitting block", { blockNumber: blockNum.toString(), logs: logs.length });
+            subscriber.next({ blockNumber: blockNum, logs });
           }
         }
 

@@ -7,8 +7,11 @@ import { schemasTable } from "@latticexyz/store-sync";
 import { queryLogs } from "./queryLogs";
 import { recordToLog } from "./recordToLog";
 import { debug, error } from "../debug";
+import { logger } from "../logger";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
+
+const log = logger.child({ component: "api-logs" });
 
 export function apiRoutes(database: Sql): Middleware {
   const router = new Router();
@@ -27,9 +30,11 @@ export function apiRoutes(database: Sql): Middleware {
       return;
     }
 
-    debug(
-      `request received (chainId=${options.chainId}, address=${options.address}, filters=${options.filters.length})`,
-    );
+    log.info("request received", {
+      chainId: options.chainId,
+      address: options.address ?? "*",
+      filters: options.filters.length,
+    });
 
     try {
       options.filters = options.filters.length > 0 ? [...options.filters, { tableId: schemasTable.tableId }] : [];
@@ -72,7 +77,7 @@ export function apiRoutes(database: Sql): Middleware {
       );
 
       ctx.set("Content-Type", "application/json");
-      debug(`response ok (blockNumber=${blockNumber}, logs=${logs.length})`);
+      log.info("response ok", { blockNumber: blockNumber.toString(), logs: logs.length });
       ctx.body = JSON.stringify({ blockNumber, logs });
     } catch (e) {
       debug("request failed:", e);

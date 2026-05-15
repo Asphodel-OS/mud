@@ -37,3 +37,6 @@ publish-frontend-test:
 
 vendor-indexer:
 	./scripts/vendor-indexer.sh
+
+vendor-store-sync:
+	./scripts/vendor-store-sync.sh

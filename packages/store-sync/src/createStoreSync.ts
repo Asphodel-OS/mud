@@ -36,11 +36,10 @@ import {
   ReplaySubject,
   timer,
   retry,
-  finalize,
 } from "rxjs";
 import { debug as parentDebug } from "./debug";
 import { SyncStep } from "./SyncStep";
-import { bigIntMax, chunk, isDefined, waitForIdle } from "@latticexyz/common/utils";
+import { bigIntMax, isDefined } from "@latticexyz/common/utils";
 import { getSnapshot } from "./getSnapshot";
 import { fromEventSource } from "./fromEventSource";
 import { fetchAndStoreLogs } from "./fetchAndStoreLogs";
@@ -100,7 +99,6 @@ export async function createStoreSync({
   maxBlockRange,
   initialState,
   initialBlockLogs,
-  enableHydrationChunking = true,
   ...opts
 }: CreateStoreSyncOptions): Promise<SyncResult> {
   const filters: SyncFilter[] =
@@ -172,19 +170,8 @@ export async function createStoreSync({
   );
 
   const storedInitialBlockLogs$ = initialBlockLogs$.pipe(
-    tap({
-      subscribe: () => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ subscribed"),
-      next: (v) => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ next (raw)", v === undefined ? "undefined" : `block=${v.blockNumber?.toString?.()} logs=${v.logs?.length}`),
-      error: (e) => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ error (raw)", e?.message ?? e),
-      complete: () => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ complete (raw source)"),
-      unsubscribe: () => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ unsubscribe"),
-    }),
     filter(isDefined),
-    tap({
-      next: (v) => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ after filter, entering concatMap, block", v.blockNumber?.toString?.()),
-    }),
     concatMap(async ({ blockNumber, logs }) => {
-      console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ concatMap START block", blockNumber?.toString?.(), "logs", logs.length);
       debug("hydrating", logs.length, "logs to block", blockNumber);
 
       onProgress?.({
@@ -195,24 +182,11 @@ export async function createStoreSync({
         message: "Hydrating from snapshot",
       });
 
-      // PATCH: Always hydrate in one synchronous burst, regardless of `enableHydrationChunking`.
-      //
-      // The chunked variant interleaved `storageAdapter` calls with `await waitForIdle()`
-      // to let React render incremental progress. But on a busy page (modal animations,
-      // setInterval-driven state updates, large React commits triggered by the first
-      // chunk's stash writes cascading to `useRecord` subscribers), the yield never
-      // gets to run: requestIdleCallback / setTimeout(0) / queueMicrotask all sit
-      // behind the React commit. The for-loop deadlocks at iteration 0, `concatMap`
-      // never completes, `concat` never advances to `storedBlock$`, the live SSE
-      // subscription is never opened, and the consumer sees an indefinite hang.
-      //
-      // Snapshot writes are fast (606 logs took <20 ms total in measurements). The
-      // progress UI sacrificed by skipping chunking is negligible. Reliability of
-      // sync re-establishment matters more.
-      console.log(`[STORE-SYNC-DIAG] hydration (no-chunk fix) writing ${logs.length} logs in one call`);
-      const tStart = performance.now();
+      // Write the snapshot in a single call. The upstream chunked variant interleaved
+      // `await waitForIdle()` between chunks, which deadlocked on busy pages: the yield
+      // never fired, `concatMap` never completed, and the live SSE leg of `concat` was
+      // never subscribed — causing reroll/mint flows to hang until manual reload.
       await storageAdapter({ blockNumber, logs });
-      console.log(`[STORE-SYNC-DIAG] hydration (no-chunk fix) done in ${(performance.now() - tStart).toFixed(0)}ms`);
 
       onProgress?.({
         step: SyncStep.SNAPSHOT,
@@ -222,13 +196,7 @@ export async function createStoreSync({
         message: "Hydrated from snapshot",
       });
 
-      console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ concatMap END block", blockNumber?.toString?.());
       return { blockNumber, logs };
-    }),
-    tap({
-      next: (v) => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ post-concatMap emit block", v.blockNumber?.toString?.()),
-      complete: () => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ COMPLETE (post-concatMap) — concat should now switch to storedBlock$"),
-      error: (e) => console.log("[STORE-SYNC-DIAG] storedInitialBlockLogs$ post-concatMap error", e?.message ?? e),
     }),
     shareReplay(1),
   );
@@ -247,7 +215,6 @@ export async function createStoreSync({
 
   const latestBlock$ = defer(() => {
     debug("creating block stream");
-    console.log("[STORE-SYNC-DIAG] latestBlock$ defer running -> createBlockStream");
     return createBlockStream({ ...opts, blockTag: followBlockTag });
   }).pipe(
     // TODO: detect network online and reset this
@@ -258,14 +225,6 @@ export async function createStoreSync({
       },
       resetOnSuccess: true,
     }),
-    tap({
-      subscribe: () => console.log("[STORE-SYNC-DIAG] latestBlock$ subscribed"),
-      next: (b) => console.log("[STORE-SYNC-DIAG] latestBlock$ next block", b.number?.toString?.() ?? "?"),
-      error: (e) => console.log("[STORE-SYNC-DIAG] latestBlock$ error", e?.message ?? e),
-      complete: () => console.log("[STORE-SYNC-DIAG] latestBlock$ complete"),
-      unsubscribe: () => console.log("[STORE-SYNC-DIAG] latestBlock$ unsubscribe (downstream)"),
-    }),
-    finalize(() => console.log("[STORE-SYNC-DIAG] latestBlock$ finalize (teardown)")),
     share({
       connector: () => new ReplaySubject(1),
       resetOnError: true,
@@ -310,13 +269,6 @@ export async function createStoreSync({
 
   const storedIndexerLogs$ = indexerUrl
     ? startBlock$.pipe(
-        tap({
-          subscribe: () => console.log("[STORE-SYNC-DIAG] storedIndexerLogs$.startBlock$ subscribed"),
-          next: (sb) => console.log("[STORE-SYNC-DIAG] storedIndexerLogs$ startBlock emit", sb?.toString?.() ?? sb),
-          error: (e) => console.log("[STORE-SYNC-DIAG] storedIndexerLogs$.startBlock$ error", e?.message ?? e),
-          complete: () => console.log("[STORE-SYNC-DIAG] storedIndexerLogs$.startBlock$ complete"),
-          unsubscribe: () => console.log("[STORE-SYNC-DIAG] storedIndexerLogs$.startBlock$ unsubscribe"),
-        }),
         mergeMap((startBlock) => {
           const url = new URL(
             `api/logs-live?${new URLSearchParams({
@@ -326,17 +278,7 @@ export async function createStoreSync({
             })}`,
             indexerUrl,
           );
-          console.log("[STORE-SYNC-DIAG] storedIndexerLogs$ mergeMap -> opening SSE", url.toString());
-          return fromEventSource<string>(url).pipe(
-            tap({
-              subscribe: () => console.log("[STORE-SYNC-DIAG] fromEventSource subscribed", url.toString()),
-              next: () => console.log("[STORE-SYNC-DIAG] fromEventSource next event"),
-              error: (e) => console.log("[STORE-SYNC-DIAG] fromEventSource error", e?.message ?? e),
-              complete: () => console.log("[STORE-SYNC-DIAG] fromEventSource complete"),
-              unsubscribe: () => console.log("[STORE-SYNC-DIAG] fromEventSource unsubscribe"),
-            }),
-            finalize(() => console.log("[STORE-SYNC-DIAG] fromEventSource finalize (teardown)", url.toString())),
-          );
+          return fromEventSource<string>(url);
         }),
         map((messageEvent) => {
           const data = JSON.parse(messageEvent.data);

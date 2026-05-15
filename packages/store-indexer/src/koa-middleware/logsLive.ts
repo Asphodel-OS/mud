@@ -2,9 +2,10 @@ import { Middleware } from "koa";
 import { Observable, Subscription } from "rxjs";
 import { input } from "@latticexyz/store-sync/indexer-client";
 import { StorageAdapterBlock, StorageAdapterLog } from "@latticexyz/store-sync";
-import { debug as parentDebug, error } from "../debug";
+import { error } from "../debug";
+import { logger } from "../logger";
 
-const debug = parentDebug.extend("logs-live");
+const log = logger.child({ component: "logs-live" });
 
 type LogsLiveOptions = {
   storedBlockLogs$: Observable<StorageAdapterBlock>;
@@ -60,7 +61,7 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
 
     const { address, filters } = parsedInput;
 
-    debug(`client connected (address=${address ?? "*"}, filters=${filters.length}, fromBlock=${blockNum})`);
+    log.info("client connected", { address: address ?? "*", filters: filters.length, fromBlock: blockNum.toString() });
 
     ctx.respond = false;
     ctx.res.writeHead(200, {
@@ -83,7 +84,7 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
     }
 
     ctx.req.once("close", () => {
-      debug(`client disconnected (address=${address ?? "*"})`);
+      log.info("client disconnected", { address: address ?? "*" });
       cleanup();
     });
 
@@ -118,7 +119,11 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
           blockNumber: block.blockNumber.toString(),
           logs,
         };
-        debug(`emitting block ${block.blockNumber} with ${logs.length} logs (address=${address ?? "*"})`);
+        log.info("pushing downstream", {
+          blockNumber: block.blockNumber.toString(),
+          logs: logs.length,
+          address: address ?? "*",
+        });
         ctx.res.write(`data: ${bigIntSafeStringify(frame)}\n\n`);
       },
       error: (err) => {

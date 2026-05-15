@@ -16,6 +16,8 @@ import { helloWorld } from "../koa-middleware/helloWorld";
 import { metrics } from "../koa-middleware/metrics";
 import { logsLive } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
+import { logger } from "../logger";
+import packageJson from "../../package.json";
 
 const env = parseEnv(
   z.intersection(
@@ -28,7 +30,10 @@ const env = parseEnv(
   ),
 );
 
-const database = postgres(env.DATABASE_URL, { prepare: false });
+const database = postgres(env.DATABASE_URL, {
+  prepare: false,
+  onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
+});
 
 const storedBlockLogs$ = createBlockLogsStream({
   sql: database,
@@ -64,4 +69,4 @@ server.use(
 );
 
 server.listen({ host: env.HOST, port: env.PORT });
-console.log(`postgres indexer frontend listening on http://${env.HOST}:${env.PORT}`);
+logger.info("starting postgres-frontend", { version: packageJson.version, host: env.HOST, port: env.PORT });

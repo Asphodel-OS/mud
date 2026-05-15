@@ -1,5 +1,6 @@
 import { Hex, isHex } from "viem";
 import { z, ZodError, ZodTypeAny } from "zod";
+import { logger } from "../logger";
 
 export const frontendEnvSchema = z.object({
   HOST: z.string().default("0.0.0.0"),
@@ -8,7 +9,7 @@ export const frontendEnvSchema = z.object({
 
 export const indexerEnvSchema = z.intersection(
   z.object({
-    FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("safe"),
+    FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("latest"),
     START_BLOCK: z.coerce.bigint().nonnegative().default(0n),
     MAX_BLOCK_RANGE: z.coerce.bigint().positive().default(1000n),
     POLLING_INTERVAL: z.coerce.number().positive().default(1000),
@@ -21,6 +22,11 @@ export const indexerEnvSchema = z.intersection(
       .string()
       .optional()
       .transform((input) => input === "true" || input === "1"),
+    REORG_SAFE: z
+      .string()
+      .optional()
+      .transform((input) => input === "true" || input === "1"),
+    REORG_WINDOW: z.coerce.bigint().positive().default(64n),
   }),
   z.union([
     z.object({
@@ -40,7 +46,7 @@ export function parseEnv<TSchema extends ZodTypeAny>(envSchema: TSchema): z.infe
   } catch (error) {
     if (error instanceof ZodError) {
       const { ...invalidEnvVars } = error.format();
-      console.error(`\nMissing or invalid environment variables:\n\n  ${Object.keys(invalidEnvVars).join("\n  ")}\n`);
+      logger.error("missing or invalid environment variables", { vars: Object.keys(invalidEnvVars) });
       process.exit(1);
     }
     throw error;

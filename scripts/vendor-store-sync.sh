@@ -16,7 +16,7 @@ fi
 
 echo "Building @latticexyz/store-sync..."
 cd "$MUD_ROOT/packages/store-sync"
-pnpm tsup --no-dts
+pnpm tsup
 
 echo "Packing tarball..."
 pnpm pack

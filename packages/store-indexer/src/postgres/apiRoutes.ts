@@ -10,11 +10,57 @@ import { debug, error } from "../debug";
 import { logger } from "../logger";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
+import type { LeaderboardCache } from "./aggregateCache";
 
 const log = logger.child({ component: "api-logs" });
 
-export function apiRoutes(database: Sql): Middleware {
+// bigint-safe JSON: ids serialize to strings. The cache's byWallet/byTaruchi
+// Maps are never passed in here (we send plain arrays only).
+const jsonBigint = (value: unknown): string =>
+  JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+
+export function apiRoutes(database: Sql, leaderboardCache: LeaderboardCache): Middleware {
   const router = new Router();
+
+  // Server-side aggregated leaderboard (trainers + per-taruchi + ascended).
+  // 503 until the first cache build succeeds — never serve an empty board as valid.
+  router.get("/api/leaderboard", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const agg = leaderboardCache.getAggregate();
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      overall: agg.overall,
+      overallByTaruchi: agg.overallByTaruchi,
+      ascended: agg.ascended,
+      recordCount: agg.recordCount,
+      computedAt: agg.computedAt,
+    });
+  });
+
+  // One trainer's stats row + full roster (all owned tarus incl. zero-match).
+  router.get("/api/trainer/:wallet", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const wallet = String(ctx.params.wallet ?? "");
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      wallet: wallet.toLowerCase(),
+      stats: leaderboardCache.getStats(wallet),
+      roster: leaderboardCache.getRoster(wallet),
+      computedAt: leaderboardCache.computedAt(),
+    });
+  });
 
   router.get("/api/logs", compress(), async (ctx) => {
     const benchmark = createBenchmark("postgres:logs");

@@ -26,7 +26,7 @@ re-run the parity test. Files mirror their game2 origins:
 | `buildAggregate.ts`      | `src/mud/useLeaderboard/buildAggregate.ts`                    |
 | `buildAggregate.test.ts` | `src/mud/useLeaderboard/buildAggregate.test.ts`               |
 
-Only import paths were rewritten (flattened into this dir); logic is byte-identical.
+These are behaviorally identical to game2; they differ only in import paths (flattened into this dir) and lint formatting, not logic.
 (The test additionally got explicit return-type annotations on three stub helpers
 to satisfy mud's stricter eslint — `@typescript-eslint/explicit-function-return-type` —
 no behavioral change.)

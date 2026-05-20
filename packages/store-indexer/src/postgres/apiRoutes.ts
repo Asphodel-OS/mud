@@ -62,6 +62,25 @@ export function apiRoutes(database: Sql, leaderboardCache: LeaderboardCache): Mi
     });
   });
 
+  // One trainer's finished matches (newest first) for the Mine archive.
+  // Summaries only; full replay loads on click via keyed /api/logs (matchId).
+  router.get("/api/trainer/:wallet/battles", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const wallet = String(ctx.params.wallet ?? "");
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      wallet: wallet.toLowerCase(),
+      battles: leaderboardCache.getBattles(wallet),
+      computedAt: leaderboardCache.computedAt(),
+    });
+  });
+
   router.get("/api/logs", compress(), async (ctx) => {
     const benchmark = createBenchmark("postgres:logs");
     let options: ReturnType<typeof input.parse>;

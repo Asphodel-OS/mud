@@ -2,6 +2,7 @@ import { Sql } from "postgres";
 import { Observable, Subscription } from "rxjs";
 import { hexToString, type Hex } from "viem";
 import { buildAggregate } from "../leaderboard/buildAggregate";
+import { unpackU32 } from "../leaderboard/packUtils";
 import {
   ONYX_PROTOCOL_FEE_BPS,
   ONYX_FESTIVAL_PROTOCOL_FEE_BPS,
@@ -60,6 +61,27 @@ export interface TrainerRosterEntry {
   imageUrl: string;
 }
 
+/** One participant in a match summary. bigint id as string for JSON. */
+export interface MatchParticipant {
+  taruchiId: string;
+  index: number;
+  name: string;
+  imageUrl: string;
+}
+
+/** A finished match (duel or festival) a wallet's taru was in — enough to render
+ *  an archive card. Full replay loads on click via keyed /api/logs (matchId). */
+export interface MatchSummary {
+  matchId: string;
+  type: "duel" | "festival";
+  bracket: number;
+  /** TourneyResult.time (unix seconds); 0 if unset. */
+  time: number;
+  /** Taru indices in placement order (1st..last); duel = [winner, loser]. */
+  placements: number[];
+  participants: MatchParticipant[];
+}
+
 export interface LeaderboardCache {
   isReady(): boolean;
   /** Empty aggregate until the first build succeeds. */
@@ -68,6 +90,8 @@ export interface LeaderboardCache {
   getStats(wallet: string): LeaderboardRow | null;
   /** All tarus owned by a wallet (lowercased), incl. zero-match. */
   getRoster(wallet: string): TrainerRosterEntry[];
+  /** The wallet's finished matches (newest first) for the Mine archive. */
+  getBattles(wallet: string): MatchSummary[];
   computedAt(): number;
   /** Wire a recompute to a block stream (debounced) + kick the first build. */
   start(block$: Observable<unknown>): void;
@@ -77,10 +101,16 @@ export interface LeaderboardCache {
 type CacheState = {
   aggregate: LeaderboardAggregate;
   rosterByOwner: Map<string, TrainerRosterEntry[]>;
+  matchesByOwner: Map<string, MatchSummary[]>;
   computedAt: number;
 };
 
-const EMPTY_STATE: CacheState = { aggregate: EMPTY_AGGREGATE, rosterByOwner: new Map(), computedAt: 0 };
+const EMPTY_STATE: CacheState = {
+  aggregate: EMPTY_AGGREGATE,
+  rosterByOwner: new Map(),
+  matchesByOwner: new Map(),
+  computedAt: 0,
+};
 
 export function createLeaderboardCache(
   sql: Sql,
@@ -107,7 +137,7 @@ export function createLeaderboardCache(
     const [tourneyRows, duelRows, resultRows, coreRows, statusRows, nameRows] = await Promise.all([
       sql`SELECT id::text AS id, players::text AS players, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__tourney`)}`,
       sql`SELECT id::text AS id, player_a_index::int AS a, player_b_index::int AS b, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__duel`)}`,
-      sql`SELECT id::text AS id, placements::text AS placements FROM ${sql(`${schema}.app__tourney_result`)}`,
+      sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
       sql`SELECT id::text AS id, "index"::int AS index, '0x' || encode(owner, 'hex') AS owner FROM ${sql(`${schema}.app__taruchi_core`)}`,
       sql`SELECT id::text AS id, affinity::int AS affinity, state::int AS state, level::int AS level, traits::text AS traits FROM ${sql(`${schema}.app__taruchi_status`)}`,
       sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
@@ -126,7 +156,11 @@ export function createLeaderboardCache(
       bracket: Number(r.bracket),
       status: Number(r.status),
     }));
-    const results = resultRows.map((r) => ({ id: BigInt(r.id), placements: BigInt(r.placements) }));
+    const results = resultRows.map((r) => ({
+      id: BigInt(r.id),
+      placements: BigInt(r.placements),
+      time: Number(r.time),
+    }));
     const cores = coreRows.map((r) => ({ id: BigInt(r.id), owner: r.owner as string, index: Number(r.index) }));
     const statuses = statusRows.map((r) => ({
       id: BigInt(r.id),
@@ -174,7 +208,69 @@ export function createLeaderboardCache(
       else rosterByOwner.set(owner, [entry]);
     }
 
-    return { aggregate, rosterByOwner, computedAt: Date.now() };
+    // matches-by-owner: every finished duel/festival a wallet's tarus were in,
+    // for the Mine archive. Derived from tourneys/duels + results (placements +
+    // time) + cores/status/names — no BattleResult needed (the replay loads on
+    // click via keyed /api/logs by matchId). One summary object is shared across
+    // the participating owners' lists (read-only).
+    const coreByIndex = new Map(cores.map((c) => [c.index, c]));
+    const resultById = new Map(results.map((r) => [r.id, r]));
+    const participantOf = (idx: number): MatchParticipant | null => {
+      const c = coreByIndex.get(idx);
+      if (!c) return null;
+      const s = statusById.get(c.id);
+      const decoded = decodeBytes32Name(nameById.get(c.id)?.name);
+      return {
+        taruchiId: c.id.toString(),
+        index: idx,
+        name: decoded || `Taruchi #${idx}`,
+        imageUrl: traitsImageUrl(s?.traits, opts.cdnBase),
+      };
+    };
+    const matchesByOwner = new Map<string, MatchSummary[]>();
+    const addMatch = (participantIdx: number[], summary: MatchSummary): void => {
+      const owners = new Set<string>();
+      for (const idx of participantIdx) {
+        const c = coreByIndex.get(idx);
+        if (c) owners.add(c.owner.toLowerCase());
+      }
+      for (const owner of owners) {
+        const list = matchesByOwner.get(owner);
+        if (list) list.push(summary);
+        else matchesByOwner.set(owner, [summary]);
+      }
+    };
+    for (const tr of tourneys) {
+      if (tr.status !== 2) continue; // COMPLETED only
+      const res = resultById.get(tr.id);
+      if (!res) continue;
+      const playerIdx = unpackU32(tr.players).filter((i) => i !== 0);
+      addMatch(playerIdx, {
+        matchId: tr.id.toString(),
+        type: "festival",
+        bracket: tr.bracket,
+        time: res.time,
+        placements: unpackU32(res.placements).filter((i) => i !== 0),
+        participants: playerIdx.map(participantOf).filter((p): p is MatchParticipant => p !== null),
+      });
+    }
+    for (const d of duels) {
+      if (d.status !== 2) continue; // COMPLETED only
+      const res = resultById.get(d.id);
+      if (!res) continue;
+      const playerIdx = [d.playerAIndex, d.playerBIndex].filter((i) => i !== 0);
+      addMatch(playerIdx, {
+        matchId: d.id.toString(),
+        type: "duel",
+        bracket: d.bracket,
+        time: res.time,
+        placements: unpackU32(res.placements).filter((i) => i !== 0),
+        participants: playerIdx.map(participantOf).filter((p): p is MatchParticipant => p !== null),
+      });
+    }
+    for (const list of matchesByOwner.values()) list.sort((a, b) => b.time - a.time);
+
+    return { aggregate, rosterByOwner, matchesByOwner, computedAt: Date.now() };
   }
 
   async function rebuild(): Promise<void> {
@@ -221,6 +317,7 @@ export function createLeaderboardCache(
     getAggregate: () => state.aggregate,
     getStats: (wallet) => state.aggregate.byWallet.get(wallet.toLowerCase()) ?? null,
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
+    getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
     computedAt: () => state.computedAt,
     start: (block$): void => {
       void rebuild(); // immediate build on startup

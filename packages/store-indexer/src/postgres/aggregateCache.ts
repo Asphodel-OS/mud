@@ -3,6 +3,7 @@ import { Observable, Subscription } from "rxjs";
 import { hexToString, type Hex } from "viem";
 import { buildAggregate } from "../leaderboard/buildAggregate";
 import { unpackU32 } from "../leaderboard/packUtils";
+import { positionToPlacement } from "../leaderboard/tourneyMath";
 import {
   ONYX_PROTOCOL_FEE_BPS,
   ONYX_FESTIVAL_PROTOCOL_FEE_BPS,
@@ -65,20 +66,23 @@ export interface TrainerRosterEntry {
 export interface MatchParticipant {
   taruchiId: string;
   index: number;
+  /** Current owner (lowercased) — lets the client tell mine-vs-opponent and show the trainer. */
+  ownerAddress: string;
   name: string;
   imageUrl: string;
+  /** Finishing placement (1 = winner). Festival ranks via positionToPlacement (contract slot → rank). */
+  placement: number;
 }
 
-/** A finished match (duel or festival) a wallet's taru was in — enough to render
- *  an archive card. Full replay loads on click via keyed /api/logs (matchId). */
+/** A finished match (duel or festival) a wallet's taru was in — archive-card-ready.
+ *  Full replay loads on click via keyed /api/logs (matchId). */
 export interface MatchSummary {
   matchId: string;
   type: "duel" | "festival";
   bracket: number;
   /** TourneyResult.time (unix seconds); 0 if unset. */
   time: number;
-  /** Taru indices in placement order (1st..last); duel = [winner, loser]. */
-  placements: number[];
+  /** Participants sorted by placement (1st first); each carries ownerAddress + placement. */
   participants: MatchParticipant[];
 }
 
@@ -215,7 +219,8 @@ export function createLeaderboardCache(
     // the participating owners' lists (read-only).
     const coreByIndex = new Map(cores.map((c) => [c.index, c]));
     const resultById = new Map(results.map((r) => [r.id, r]));
-    const participantOf = (idx: number): MatchParticipant | null => {
+    type ParticipantBase = Omit<MatchParticipant, "placement">;
+    const participantOf = (idx: number): ParticipantBase | null => {
       const c = coreByIndex.get(idx);
       if (!c) return null;
       const s = statusById.get(c.id);
@@ -223,18 +228,35 @@ export function createLeaderboardCache(
       return {
         taruchiId: c.id.toString(),
         index: idx,
+        ownerAddress: c.owner.toLowerCase(),
         name: decoded || `Taruchi #${idx}`,
         imageUrl: traitsImageUrl(s?.traits, opts.cdnBase),
       };
     };
+    // res.placements is the contract result array (slot positions, NOT 1st..last
+    // for festivals): map each position → placement rank via positionToPlacement
+    // (same fn buildAggregate uses), attach per participant, and sort by placement
+    // so the client gets archive-card-ready data without cross-joining the roster.
+    const buildMatch = (
+      matchId: bigint,
+      type: "duel" | "festival",
+      bracket: number,
+      res: { placements: bigint; time: number },
+    ): MatchSummary => {
+      const slots = unpackU32(res.placements);
+      const participants = slots
+        .map((idx, pos): MatchParticipant | null => {
+          if (idx === 0) return null;
+          const base = participantOf(idx);
+          return base ? { ...base, placement: positionToPlacement(pos, slots.length) } : null;
+        })
+        .filter((p): p is MatchParticipant => p !== null)
+        .sort((a, b) => a.placement - b.placement);
+      return { matchId: matchId.toString(), type, bracket, time: res.time, participants };
+    };
     const matchesByOwner = new Map<string, MatchSummary[]>();
-    const addMatch = (participantIdx: number[], summary: MatchSummary): void => {
-      const owners = new Set<string>();
-      for (const idx of participantIdx) {
-        const c = coreByIndex.get(idx);
-        if (c) owners.add(c.owner.toLowerCase());
-      }
-      for (const owner of owners) {
+    const addMatch = (summary: MatchSummary): void => {
+      for (const owner of new Set(summary.participants.map((p) => p.ownerAddress))) {
         const list = matchesByOwner.get(owner);
         if (list) list.push(summary);
         else matchesByOwner.set(owner, [summary]);
@@ -243,30 +265,12 @@ export function createLeaderboardCache(
     for (const tr of tourneys) {
       if (tr.status !== 2) continue; // COMPLETED only
       const res = resultById.get(tr.id);
-      if (!res) continue;
-      const playerIdx = unpackU32(tr.players).filter((i) => i !== 0);
-      addMatch(playerIdx, {
-        matchId: tr.id.toString(),
-        type: "festival",
-        bracket: tr.bracket,
-        time: res.time,
-        placements: unpackU32(res.placements).filter((i) => i !== 0),
-        participants: playerIdx.map(participantOf).filter((p): p is MatchParticipant => p !== null),
-      });
+      if (res) addMatch(buildMatch(tr.id, "festival", tr.bracket, res));
     }
     for (const d of duels) {
       if (d.status !== 2) continue; // COMPLETED only
       const res = resultById.get(d.id);
-      if (!res) continue;
-      const playerIdx = [d.playerAIndex, d.playerBIndex].filter((i) => i !== 0);
-      addMatch(playerIdx, {
-        matchId: d.id.toString(),
-        type: "duel",
-        bracket: d.bracket,
-        time: res.time,
-        placements: unpackU32(res.placements).filter((i) => i !== 0),
-        participants: playerIdx.map(participantOf).filter((p): p is MatchParticipant => p !== null),
-      });
+      if (res) addMatch(buildMatch(d.id, "duel", d.bracket, res));
     }
     for (const list of matchesByOwner.values()) list.sort((a, b) => b.time - a.time);
 

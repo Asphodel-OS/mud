@@ -9,6 +9,8 @@ if [ -d "$MUD_ROOT/../game2" ]; then
   VENDOR_DIR="$(cd "$MUD_ROOT/../game2" && pwd)/vendor"
 elif [ -d "$MUD_ROOT/../taruchi" ]; then
   VENDOR_DIR="$(cd "$MUD_ROOT/../taruchi" && pwd)/vendor"
+elif [ -d "$MUD_ROOT/../prolog" ]; then
+  VENDOR_DIR="$(cd "$MUD_ROOT/../prolog" && pwd)/vendor"
 else
   echo "ERROR: neither ../game2 nor ../taruchi exists relative to $MUD_ROOT" >&2
   exit 1

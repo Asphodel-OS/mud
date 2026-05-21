@@ -2,7 +2,12 @@ import { Hex, sliceHex, hexToBigInt, hexToNumber } from "viem";
 import { resourceToHex } from "@latticexyz/common";
 import { StorageAdapterLog, StorageAdapter, StorageAdapterBlock } from "@latticexyz/store-sync";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { logger } from "./logger";
+
+const SQS_CONNECTION_TIMEOUT_MS = 5_000;
+const SQS_REQUEST_TIMEOUT_MS = 10_000;
+const SQS_MAX_ATTEMPTS = 3;
 
 const log = logger.child({ component: "sqs" });
 
@@ -50,7 +55,13 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
 }
 
 export function createRevealHookAdapter(inner: StorageAdapter, sqsQueueUrl: string): StorageAdapter {
-  const sqs = new SQSClient({});
+  const sqs = new SQSClient({
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: SQS_CONNECTION_TIMEOUT_MS,
+      requestTimeout: SQS_REQUEST_TIMEOUT_MS,
+    }),
+    maxAttempts: SQS_MAX_ATTEMPTS,
+  });
 
   return async (block: StorageAdapterBlock): Promise<void> => {
     await inner(block);

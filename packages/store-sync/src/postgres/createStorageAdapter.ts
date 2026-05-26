@@ -1,6 +1,6 @@
 import { encodePacked, size } from "viem";
 import { PgDatabase, QueryResultHKT } from "drizzle-orm/pg-core";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { debug } from "./debug";
 import { tables } from "./tables";
 import { spliceHex } from "@latticexyz/common";
@@ -21,9 +21,11 @@ export type PostgresStorageAdapter = {
 
 export async function createStorageAdapter({
   database,
+  backfillMode = false,
   ...opts
 }: GetRpcClientOptions & {
   database: PgDatabase<QueryResultHKT>;
+  backfillMode?: boolean;
 }): Promise<PostgresStorageAdapter> {
   const cleanUp: (() => Promise<void>)[] = [];
 
@@ -69,6 +71,7 @@ export async function createStorageAdapter({
                 logIndex: log.logIndex ?? 0,
                 isDeleted: false,
               },
+              where: backfillMode ? sql`${tables.recordsTable.blockNumber} < ${blockNumber}` : undefined,
             })
             .execute();
         } else if (log.eventName === "Store_SpliceStaticData") {
@@ -120,6 +123,7 @@ export async function createStorageAdapter({
                 logIndex: log.logIndex,
                 isDeleted: false,
               },
+              where: backfillMode ? sql`${tables.recordsTable.blockNumber} < ${blockNumber}` : undefined,
             })
             .execute();
         } else if (log.eventName === "Store_SpliceDynamicData") {
@@ -173,6 +177,7 @@ export async function createStorageAdapter({
                 logIndex: log.logIndex ?? 0,
                 isDeleted: false,
               },
+              where: backfillMode ? sql`${tables.recordsTable.blockNumber} < ${blockNumber}` : undefined,
             })
             .execute();
         } else if (log.eventName === "Store_DeleteRecord") {
@@ -197,26 +202,29 @@ export async function createStorageAdapter({
                 eq(tables.recordsTable.address, log.address),
                 eq(tables.recordsTable.tableId, log.args.tableId),
                 eq(tables.recordsTable.keyBytes, keyBytes),
+                ...(backfillMode ? [sql`${tables.recordsTable.blockNumber} < ${blockNumber}`] : []),
               ),
             )
             .execute();
         }
       }
 
-      await tx
-        .insert(tables.configTable)
-        .values({
-          version,
-          chainId,
-          blockNumber,
-        })
-        .onConflictDoUpdate({
-          target: [tables.configTable.chainId],
-          set: {
+      if (!backfillMode) {
+        await tx
+          .insert(tables.configTable)
+          .values({
+            version,
+            chainId,
             blockNumber,
-          },
-        })
-        .execute();
+          })
+          .onConflictDoUpdate({
+            target: [tables.configTable.chainId],
+            set: {
+              blockNumber,
+            },
+          })
+          .execute();
+      }
     });
   }
 

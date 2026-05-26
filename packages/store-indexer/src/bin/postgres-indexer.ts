@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
+import { parseArgs } from "node:util";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { combineLatest, filter, first, tap } from "rxjs";
@@ -35,7 +36,30 @@ const env = parseEnv(
   ),
 );
 
+const { values: cliArgs } = parseArgs({
+  options: {
+    backfill: { type: "string" },
+  },
+  strict: false,
+});
+
+const backfillRange = (() => {
+  if (typeof cliArgs.backfill !== "string") return null;
+  const match = /^(\d+)-(\d+)$/.exec(cliArgs.backfill);
+  if (!match) throw new Error(`Invalid --backfill range: ${cliArgs.backfill} (expected "FROM-TO")`);
+  const from = BigInt(match[1]);
+  const to = BigInt(match[2]);
+  if (from > to) throw new Error(`Invalid --backfill range: FROM (${from}) > TO (${to})`);
+  return { from, to };
+})();
+
 logger.info("starting postgres-indexer", { version: packageJson.version });
+if (backfillRange) {
+  logger.info("backfill mode active — live checkpoint will NOT advance", {
+    from: backfillRange.from.toString(),
+    to: backfillRange.to.toString(),
+  });
+}
 
 const clientOptions = await getClientOptions(env);
 const publicClient = getRpcClient(clientOptions);
@@ -47,7 +71,7 @@ const database = drizzle(
   }),
 );
 
-if (await shouldCleanDatabase(database, chainId)) {
+if (!backfillRange && (await shouldCleanDatabase(database, chainId))) {
   logger.info("outdated database detected, clearing data to start fresh");
   await cleanDatabase(database);
 }
@@ -79,7 +103,11 @@ async function getDistanceFromFollowBlock(configTable: (typeof mudTables)["confi
 }
 
 async function startSync(): Promise<void> {
-  const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
+  const { storageAdapter, tables } = await createStorageAdapter({
+    ...clientOptions,
+    database,
+    backfillMode: backfillRange != null,
+  });
 
   const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);
 
@@ -97,11 +125,17 @@ async function startSync(): Promise<void> {
     logger.info("reorg-safe enabled", { component: "reorg", window: env.REORG_WINDOW });
   }
 
-  const latestStoredBlockNumber = await getLatestStoredBlockNumber(tables.configTable);
-  let startBlock = env.START_BLOCK;
-  if (latestStoredBlockNumber != null) {
-    startBlock = latestStoredBlockNumber + 1n;
-    logger.info("resuming from block", { blockNumber: startBlock });
+  let startBlock: bigint;
+  if (backfillRange) {
+    startBlock = backfillRange.from;
+    logger.info("backfill starting from block", { blockNumber: startBlock });
+  } else {
+    const latestStoredBlockNumber = await getLatestStoredBlockNumber(tables.configTable);
+    startBlock = env.START_BLOCK;
+    if (latestStoredBlockNumber != null) {
+      startBlock = latestStoredBlockNumber + 1n;
+      logger.info("resuming from block", { blockNumber: startBlock });
+    }
   }
 
   const { latestBlock$, latestBlockNumber$, storedBlockLogs$ } = await createStoreSync({
@@ -130,6 +164,18 @@ async function startSync(): Promise<void> {
   }
 
   storedBlockLogs$.subscribe();
+
+  if (backfillRange) {
+    storedBlockLogs$
+      .pipe(
+        filter(({ blockNumber }) => blockNumber >= backfillRange.to),
+        first(),
+      )
+      .subscribe(({ blockNumber }) => {
+        logger.info("backfill complete, exiting", { blockNumber: blockNumber.toString() });
+        process.exit(0);
+      });
+  }
 
   isCaughtUp = false;
   combineLatest([latestBlockNumber$, storedBlockLogs$])

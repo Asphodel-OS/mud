@@ -25,11 +25,13 @@ export type PostgresStorageAdapter = {
 
 export async function createStorageAdapter({
   database,
+  backfillMode = false,
   ...opts
 }: GetRpcClientOptions & {
   database: PgDatabase<QueryResultHKT>;
+  backfillMode?: boolean;
 }): Promise<PostgresStorageAdapter> {
-  const bytesStorageAdapter = await createBytesStorageAdapter({ ...opts, database });
+  const bytesStorageAdapter = await createBytesStorageAdapter({ ...opts, database, backfillMode });
   const cleanUp: (() => Promise<void>)[] = [];
 
   async function postgresStorageAdapter({ blockNumber, logs }: StorageAdapterBlock): Promise<void> {
@@ -74,6 +76,51 @@ export async function createStorageAdapter({
           continue;
         }
         const key = decodeKey(table.keySchema as KeySchema, log.args.keyTuple);
+
+        // Backfill: mirror whatever the bytes layer just wrote, ignoring the event's own semantics.
+        // The bytes layer is authoritative (it applied the guard for offchain and overwrote with
+        // getRecord for onchain), so we just project its row into the decoded SQL table.
+        if (backfillMode) {
+          const record = await database
+            .select()
+            .from(internalTables.recordsTable)
+            .where(
+              and(
+                eq(internalTables.recordsTable.address, log.address),
+                eq(internalTables.recordsTable.tableId, log.args.tableId),
+                eq(internalTables.recordsTable.keyBytes, keyBytes),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows.find(() => true));
+          if (!record) continue;
+          if (record.isDeleted) {
+            await tx.delete(sqlTable).where(eq(sqlTable.__keyBytes, keyBytes)).execute();
+            continue;
+          }
+          const value = decodeValueArgs(table.valueSchema, {
+            staticData: record.staticData ?? "0x",
+            encodedLengths: record.encodedLengths ?? "0x",
+            dynamicData: record.dynamicData ?? "0x",
+          });
+          await tx
+            .insert(sqlTable)
+            .values({
+              __keyBytes: keyBytes,
+              __lastUpdatedBlockNumber: record.blockNumber,
+              ...key,
+              ...removeNullCharacters(table.valueSchema, value),
+            })
+            .onConflictDoUpdate({
+              target: sqlTable.__keyBytes,
+              set: {
+                __lastUpdatedBlockNumber: record.blockNumber,
+                ...removeNullCharacters(table.valueSchema, value),
+              },
+            })
+            .execute();
+          continue;
+        }
 
         if (
           log.eventName === "Store_SetRecord" ||

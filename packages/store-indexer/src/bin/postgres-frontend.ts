@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { z } from "zod";
+import { isHex, type Hex } from "viem";
 import Koa from "koa";
 import cors from "@koa/cors";
 import { createKoaMiddleware } from "trpc-koa-adapter";
@@ -16,6 +17,9 @@ import { helloWorld } from "../koa-middleware/helloWorld";
 import { metrics } from "../koa-middleware/metrics";
 import { logsLive } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
+import { createLeaderboardCache } from "../postgres/aggregateCache";
+import { logger } from "../logger";
+import packageJson from "../../package.json";
 
 const env = parseEnv(
   z.intersection(
@@ -24,16 +28,36 @@ const env = parseEnv(
       DATABASE_URL: z.string(),
       SENTRY_DSN: z.string().optional(),
       POLLING_INTERVAL: z.coerce.number().positive().default(1000),
+      // Required: the decoded MUD tables live in a Postgres schema named after
+      // the lowercased store address. Explicit (not runtime-discovered) so the
+      // frontend fails fast if it's missing.
+      STORE_ADDRESS: z.string().refine((s): s is Hex => isHex(s), "STORE_ADDRESS must be a 0x-prefixed hex address"),
+      // CDN base for taruchi sprite URLs in leaderboard responses. Env-driven so
+      // the indexer isn't coupled to a hardcoded (test) CDN.
+      TARUCHI_CDN_BASE: z.string().default("https://i.test.kamigotchi.io/taruchi"),
     }),
   ),
 );
 
-const database = postgres(env.DATABASE_URL, { prepare: false });
+const database = postgres(env.DATABASE_URL, {
+  prepare: false,
+  onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
+});
 
 const storedBlockLogs$ = createBlockLogsStream({
   sql: database,
   pollingIntervalMs: env.POLLING_INTERVAL,
 });
+
+// Server-side leaderboard/roster cache: built once on startup, recomputed on
+// each new block (debounced to <=60s), served pre-aggregated so clients don't
+// each pull ~34k+ raw rows. Subscribing to storedBlockLogs$ also keeps the
+// shared block poller alive (refCount).
+const leaderboardCache = createLeaderboardCache(database, {
+  storeAddress: env.STORE_ADDRESS,
+  cdnBase: env.TARUCHI_CDN_BASE,
+});
+leaderboardCache.start(storedBlockLogs$);
 
 const server = new Koa();
 
@@ -51,7 +75,7 @@ server.use(
   }),
 );
 server.use(helloWorld());
-server.use(apiRoutes(database));
+server.use(apiRoutes(database, leaderboardCache));
 
 server.use(
   createKoaMiddleware({
@@ -64,4 +88,4 @@ server.use(
 );
 
 server.listen({ host: env.HOST, port: env.PORT });
-console.log(`postgres indexer frontend listening on http://${env.HOST}:${env.PORT}`);
+logger.info("starting postgres-frontend", { version: packageJson.version, host: env.HOST, port: env.PORT });

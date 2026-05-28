@@ -39,7 +39,7 @@ import {
 } from "rxjs";
 import { debug as parentDebug } from "./debug";
 import { SyncStep } from "./SyncStep";
-import { bigIntMax, chunk, isDefined, waitForIdle } from "@latticexyz/common/utils";
+import { bigIntMax, isDefined } from "@latticexyz/common/utils";
 import { getSnapshot } from "./getSnapshot";
 import { fromEventSource } from "./fromEventSource";
 import { fetchAndStoreLogs } from "./fetchAndStoreLogs";
@@ -99,7 +99,6 @@ export async function createStoreSync({
   maxBlockRange,
   initialState,
   initialBlockLogs,
-  enableHydrationChunking = true,
   ...opts
 }: CreateStoreSyncOptions): Promise<SyncResult> {
   const filters: SyncFilter[] =
@@ -183,32 +182,11 @@ export async function createStoreSync({
         message: "Hydrating from snapshot",
       });
 
-      if (enableHydrationChunking) {
-        // Split snapshot operations into chunks so we can update the progress callback (and ultimately render visual progress for the user).
-        // This isn't ideal if we want to e.g. batch load these into a DB in a single DB tx, but we'll take it.
-        //
-        // Split into 50 equal chunks (for better `onProgress` updates) but only if we have 100+ items per chunk
-        const chunkSize = Math.max(100, Math.floor(logs.length / 50));
-        const chunks = Array.from(chunk(logs, chunkSize));
-        for (const [i, chunk] of chunks.entries()) {
-          debug(`hydrating chunk ${i}/${chunks.length}`);
-          await storageAdapter({ blockNumber, logs: chunk });
-          onProgress?.({
-            step: SyncStep.SNAPSHOT,
-            percentage: ((i + 1) / chunks.length) * 100,
-            latestBlockNumber: 0n,
-            lastBlockNumberProcessed: blockNumber,
-            message: "Hydrating from snapshot",
-          });
-          // RECS is a synchronous API so hydrating in a loop like this blocks downstream render cycles
-          // that would display the percentage climbing up to 100.
-          // We wait for idle callback here to give rendering a chance to complete.
-          await waitForIdle();
-        }
-      } else {
-        debug("hydrating all logs without chunking");
-        await storageAdapter({ blockNumber, logs });
-      }
+      // Write the snapshot in a single call. The upstream chunked variant interleaved
+      // `await waitForIdle()` between chunks, which deadlocked on busy pages: the yield
+      // never fired, `concatMap` never completed, and the live SSE leg of `concat` was
+      // never subscribed — causing reroll/mint flows to hang until manual reload.
+      await storageAdapter({ blockNumber, logs });
 
       onProgress?.({
         step: SyncStep.SNAPSHOT,

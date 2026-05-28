@@ -7,11 +7,79 @@ import { schemasTable } from "@latticexyz/store-sync";
 import { queryLogs } from "./queryLogs";
 import { recordToLog } from "./recordToLog";
 import { debug, error } from "../debug";
+import { logger } from "../logger";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
+import type { LeaderboardCache } from "./aggregateCache";
 
-export function apiRoutes(database: Sql): Middleware {
+const log = logger.child({ component: "api-logs" });
+
+// bigint-safe JSON: ids serialize to strings. The cache's byWallet/byTaruchi
+// Maps are never passed in here (we send plain arrays only).
+const jsonBigint = (value: unknown): string =>
+  JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+
+export function apiRoutes(database: Sql, leaderboardCache: LeaderboardCache): Middleware {
   const router = new Router();
+
+  // Server-side aggregated leaderboard (trainers + per-taruchi + ascended).
+  // 503 until the first cache build succeeds — never serve an empty board as valid.
+  router.get("/api/leaderboard", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const agg = leaderboardCache.getAggregate();
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      overall: agg.overall,
+      overallByTaruchi: agg.overallByTaruchi,
+      ascended: agg.ascended,
+      recordCount: agg.recordCount,
+      computedAt: agg.computedAt,
+    });
+  });
+
+  // One trainer's stats row + full roster (all owned tarus incl. zero-match).
+  router.get("/api/trainer/:wallet", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const wallet = String(ctx.params.wallet ?? "");
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      wallet: wallet.toLowerCase(),
+      stats: leaderboardCache.getStats(wallet),
+      roster: leaderboardCache.getRoster(wallet),
+      computedAt: leaderboardCache.computedAt(),
+    });
+  });
+
+  // One trainer's finished matches (newest first) for the Mine archive.
+  // Summaries only; full replay loads on click via keyed /api/logs (matchId).
+  router.get("/api/trainer/:wallet/battles", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      ctx.status = 503;
+      ctx.set("Content-Type", "application/json");
+      ctx.body = JSON.stringify({ error: "leaderboard cache warming up" });
+      return;
+    }
+    const wallet = String(ctx.params.wallet ?? "");
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = jsonBigint({
+      wallet: wallet.toLowerCase(),
+      battles: leaderboardCache.getBattles(wallet),
+      computedAt: leaderboardCache.computedAt(),
+    });
+  });
 
   router.get("/api/logs", compress(), async (ctx) => {
     const benchmark = createBenchmark("postgres:logs");
@@ -27,9 +95,11 @@ export function apiRoutes(database: Sql): Middleware {
       return;
     }
 
-    debug(
-      `request received (chainId=${options.chainId}, address=${options.address}, filters=${options.filters.length})`,
-    );
+    log.info("request received", {
+      chainId: options.chainId,
+      address: options.address ?? "*",
+      filters: options.filters.length,
+    });
 
     try {
       options.filters = options.filters.length > 0 ? [...options.filters, { tableId: schemasTable.tableId }] : [];
@@ -57,22 +127,8 @@ export function apiRoutes(database: Sql): Middleware {
       const blockNumber = records[0].chainBlockNumber;
       ctx.status = 200;
 
-      // max age is set to several multiples of the uncached response time (currently ~10s, but using 60s for wiggle room) to ensure only ~one origin request at a time
-      // and stale-while-revalidate below means that the cache is refreshed under the hood while still responding fast (cached)
-      const maxAgeSeconds = 60 * 5;
-      // we set stale-while-revalidate to the time elapsed by the number of blocks we can fetch from the RPC in the same amount of time as an uncached response
-      // meaning it would take ~the same about of time to get an uncached response from the origin as it would to catch up from the currently cached response
-      // if an uncached response takes ~10 seconds, we have ~10s to catch up, so let's say we can do enough RPC calls to fetch 4000 blocks
-      // with a block per 2 seconds, that means we can serve a stale/cached response for 8000 seconds before we should require the response be returned by the origin
-      const staleWhileRevalidateSeconds = 4000 * 2;
-
-      ctx.set(
-        "Cache-Control",
-        `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${staleWhileRevalidateSeconds}`,
-      );
-
       ctx.set("Content-Type", "application/json");
-      debug(`response ok (blockNumber=${blockNumber}, logs=${logs.length})`);
+      log.info("response ok", { blockNumber: blockNumber.toString(), logs: logs.length });
       ctx.body = JSON.stringify({ blockNumber, logs });
     } catch (e) {
       debug("request failed:", e);

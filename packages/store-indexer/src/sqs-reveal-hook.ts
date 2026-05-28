@@ -2,6 +2,14 @@ import { Hex, sliceHex, hexToBigInt, hexToNumber } from "viem";
 import { resourceToHex } from "@latticexyz/common";
 import { StorageAdapterLog, StorageAdapter, StorageAdapterBlock } from "@latticexyz/store-sync";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { logger } from "./logger";
+
+const SQS_CONNECTION_TIMEOUT_MS = 5_000;
+const SQS_REQUEST_TIMEOUT_MS = 10_000;
+const SQS_MAX_ATTEMPTS = 3;
+
+const log = logger.child({ component: "sqs" });
 
 const TARUCHI_STATUS_TABLE_ID = resourceToHex({
   type: "table",
@@ -47,7 +55,13 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
 }
 
 export function createRevealHookAdapter(inner: StorageAdapter, sqsQueueUrl: string): StorageAdapter {
-  const sqs = new SQSClient({});
+  const sqs = new SQSClient({
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: SQS_CONNECTION_TIMEOUT_MS,
+      requestTimeout: SQS_REQUEST_TIMEOUT_MS,
+    }),
+    maxAttempts: SQS_MAX_ATTEMPTS,
+  });
 
   return async (block: StorageAdapterBlock): Promise<void> => {
     await inner(block);
@@ -61,9 +75,9 @@ export function createRevealHookAdapter(inner: StorageAdapter, sqsQueueUrl: stri
             MessageBody: JSON.stringify({ code }),
           }),
         );
-        console.log(`[sqs-reveal-hook] pushed reveal code=${code} at block ${block.blockNumber}`);
+        log.info("pushed reveal code", { code, blockNumber: block.blockNumber });
       } catch (error) {
-        console.error(`[sqs-reveal-hook] failed to push code=${code} at block ${block.blockNumber}:`, error);
+        log.error("failed to push reveal code", { code, blockNumber: block.blockNumber, error });
       }
     }
   };

@@ -1154,6 +1154,9 @@ importers:
       '@sentry/utils':
         specifier: ^7.86.0
         version: 7.86.0
+      '@smithy/node-http-handler':
+        specifier: ^4.5.0
+        version: 4.5.0
       '@trpc/client':
         specifier: 10.34.0
         version: 10.34.0(@trpc/server@10.34.0)

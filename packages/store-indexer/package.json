@@ -61,6 +61,7 @@
     "@sentry/profiling-node": "^1.2.6",
     "@sentry/utils": "^7.86.0",
     "@smithy/node-http-handler": "^4.5.0",
+    "@supabase/supabase-js": "^2.101.0",
     "@trpc/client": "10.34.0",
     "@trpc/server": "10.34.0",
     "@types/koa-bodyparser": "^4.3.12",

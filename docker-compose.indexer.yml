@@ -50,6 +50,9 @@ services:
       STORE_ADDRESS: "${STORE_ADDRESS}"
       HOST: "0.0.0.0"
       PORT: "1337"
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
+      PUBLISH_RESULTS_TO_SUPABASE: "${PUBLISH_RESULTS_TO_SUPABASE:-}"
     ports:
       - "1337:1337"
     restart: unless-stopped

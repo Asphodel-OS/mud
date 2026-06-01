@@ -1,5 +1,5 @@
 # Stage 1: slim runtime base (Node + pnpm only)
-FROM node:18-bookworm-slim AS base
+FROM node:20-bookworm-slim AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PATH:$PNPM_HOME
 RUN npm install pnpm@9.6.0 --global

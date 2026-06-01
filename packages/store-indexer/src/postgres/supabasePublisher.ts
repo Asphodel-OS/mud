@@ -125,8 +125,15 @@ export function createSupabasePublisher(opts: {
 
   // Service-role client: bypasses RLS, so the default-deny INSERT policy on the
   // tables doesn't apply here. Never expose this key to the browser.
+  //
+  // supabase-js eagerly builds a RealtimeClient, which resolves a WebSocket
+  // constructor at construction time and throws on Node <22 (no global
+  // WebSocket). We only use the PostgREST HTTP API and never open a realtime
+  // channel, so we hand it an unused transport stub to skip that resolution.
+  // The stub is never instantiated because .channel() is never called.
   const supabase: SupabaseClient = createClient(opts.supabaseUrl, opts.serviceRoleKey, {
     auth: { persistSession: false, autoRefreshToken: false },
+    realtime: { transport: class UnusedRealtimeTransport {} as never },
   });
 
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;

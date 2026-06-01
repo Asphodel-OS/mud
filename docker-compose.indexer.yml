@@ -19,6 +19,8 @@ services:
       context: .
       target: store-indexer
     command: pnpm tsx src/bin/postgres-decoded-indexer.ts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -45,6 +47,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: "postgres://mud:mud@db:5432/mud"
+      STORE_ADDRESS: "${STORE_ADDRESS}"
       HOST: "0.0.0.0"
       PORT: "1337"
     ports:

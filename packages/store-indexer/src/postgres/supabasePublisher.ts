@@ -20,7 +20,7 @@ export const FESTIVAL_NAMES: Record<number, string> = {
 
 /** The single pre-formatted line stored in `announcements.message`. */
 export function formatAnnouncement(name: string): string {
-  return `ARI: The ${name} has just finished.`;
+  return `${name} has just finished.`;
 }
 
 export type FinishedTournament = {
@@ -36,6 +36,60 @@ export type FinishedTournament = {
  */
 export function newAnnouncements(finished: FinishedTournament[], existingIds: Set<string>): FinishedTournament[] {
   return finished.filter((t) => !existingIds.has(t.tournament_id));
+}
+
+/**
+ * The write half: upsert `tournament_results` + insert `announcements` for the
+ * genuinely-new tournaments. Kept separate from the Postgres read for clarity
+ * and testability. Throws on a Supabase error.
+ */
+async function publishToSupabase(
+  supabase: SupabaseClient,
+  finished: FinishedTournament[],
+  currentBlock: number,
+): Promise<{ mirrored: number; announced: number }> {
+  if (finished.length === 0) return { mirrored: 0, announced: 0 };
+
+  // Which tournaments are already mirrored? Computed BEFORE the upsert so a
+  // freshly-mirrored row isn't mistaken for pre-existing (→ no dup announce).
+  // Scoped to the current batch (.in) so this never hits PostgREST's default
+  // 1000-row select cap, which would otherwise re-announce old festivals.
+  const { data: existingRows, error: selErr } = await supabase
+    .from("tournament_results")
+    .select("tournament_id")
+    .in(
+      "tournament_id",
+      finished.map((t) => t.tournament_id),
+    );
+  if (selErr) {
+    log.error("read existing tournament_results failed", { error: selErr.message });
+    throw new Error(selErr.message);
+  }
+  const existingIds = new Set((existingRows ?? []).map((r) => String(r.tournament_id)));
+
+  // Mirror all finished festivals (idempotent by primary key).
+  const { error: upsertErr } = await supabase.from("tournament_results").upsert(
+    finished.map((t) => ({ ...t, block_number: currentBlock })),
+    { onConflict: "tournament_id" },
+  );
+  if (upsertErr) {
+    log.error("upsert tournament_results failed", { error: upsertErr.message });
+    throw new Error(upsertErr.message);
+  }
+
+  // One announcement per genuinely-new tournament.
+  const fresh = newAnnouncements(finished, existingIds);
+  if (fresh.length > 0) {
+    const { error: annErr } = await supabase
+      .from("announcements")
+      .insert(fresh.map((t) => ({ message: formatAnnouncement(t.name) })));
+    if (annErr) {
+      log.error("insert announcements failed", { error: annErr.message });
+      throw new Error(annErr.message);
+    }
+  }
+
+  return { mirrored: finished.length, announced: fresh.length };
 }
 
 export interface SupabasePublisher {
@@ -119,46 +173,8 @@ export function createSupabasePublisher(opts: {
       `;
       const currentBlock = configRows.length > 0 ? Number(BigInt(configRows[0].block_number)) : 0;
 
-      // Which tournaments are already mirrored? Computed BEFORE the upsert so a
-      // freshly-mirrored row isn't mistaken for pre-existing (→ no dup announce).
-      // Scoped to the current batch (.in) so this never hits PostgREST's default
-      // 1000-row select cap, which would otherwise re-announce old festivals.
-      const { data: existingRows, error: selErr } = await supabase
-        .from("tournament_results")
-        .select("tournament_id")
-        .in(
-          "tournament_id",
-          finished.map((t) => t.tournament_id),
-        );
-      if (selErr) {
-        log.error("read existing tournament_results failed", { error: selErr.message });
-        return;
-      }
-      const existingIds = new Set((existingRows ?? []).map((r) => String(r.tournament_id)));
-
-      // Mirror all finished festivals (idempotent by primary key).
-      const { error: upsertErr } = await supabase.from("tournament_results").upsert(
-        finished.map((t) => ({ ...t, block_number: currentBlock })),
-        { onConflict: "tournament_id" },
-      );
-      if (upsertErr) {
-        log.error("upsert tournament_results failed", { error: upsertErr.message });
-        return;
-      }
-
-      // One announcement per genuinely-new tournament.
-      const fresh = newAnnouncements(finished, existingIds);
-      if (fresh.length > 0) {
-        const { error: annErr } = await supabase
-          .from("announcements")
-          .insert(fresh.map((t) => ({ message: formatAnnouncement(t.name) })));
-        if (annErr) {
-          log.error("insert announcements failed", { error: annErr.message });
-          return;
-        }
-      }
-
-      log.info("published", { mirrored: finished.length, announced: fresh.length, block: currentBlock });
+      const { mirrored, announced } = await publishToSupabase(supabase, finished, currentBlock);
+      log.info("published", { mirrored, announced, block: currentBlock });
     } catch (e) {
       log.error("publish tick failed", { error: e instanceof Error ? e.message : String(e) });
     } finally {

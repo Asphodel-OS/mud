@@ -21,7 +21,7 @@ describe("FESTIVAL_NAMES", () => {
 
 describe("formatAnnouncement", () => {
   it("renders the pre-formatted line", () => {
-    expect(formatAnnouncement("Festival of Flowers")).toBe("ARI: The Festival of Flowers has just finished.");
+    expect(formatAnnouncement("Festival of Flowers")).toBe("Festival of Flowers has just finished.");
   });
 });
 

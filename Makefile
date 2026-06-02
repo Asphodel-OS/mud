@@ -2,7 +2,7 @@ indexer-test-up:
 	docker compose -f docker-compose.indexer.yml --env-file .env.test up -d
 
 indexer-test-down:
-	docker compose -f docker-compose.indexer.yml --env-file .env.test down
+	docker compose -f docker-compose.indexer.yml --env-file .env.test down -v
 
 indexer-prod-up:
 	docker compose -f docker-compose.indexer.yml --env-file .env up -d

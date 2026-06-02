@@ -19,6 +19,8 @@ services:
       context: .
       target: store-indexer
     command: pnpm tsx src/bin/postgres-decoded-indexer.ts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -31,6 +33,9 @@ services:
       MAX_BLOCK_RANGE: "1000"
       POLLING_INTERVAL: "1000"
       SQS_QUEUE_URL: "${SQS_QUEUE_URL:-}"
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
+      PUBLISH_RESULTS_TO_SUPABASE: "${PUBLISH_RESULTS_TO_SUPABASE:-}"
     restart: unless-stopped
 
   frontend:
@@ -45,6 +50,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: "postgres://mud:mud@db:5432/mud"
+      STORE_ADDRESS: "${STORE_ADDRESS}"
       HOST: "0.0.0.0"
       PORT: "1337"
     ports:

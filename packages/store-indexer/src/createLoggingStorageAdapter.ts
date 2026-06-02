@@ -1,24 +1,30 @@
 import { StorageAdapter, StorageAdapterBlock } from "@latticexyz/store-sync";
+import { hexToResource } from "@latticexyz/common";
 import { Logger } from "./logger";
+
+function tableLabel(tableId: `0x${string}`): string {
+  const { namespace, name } = hexToResource(tableId);
+  return namespace ? `${namespace}__${name}` : name;
+}
 
 export function createLoggingStorageAdapter(inner: StorageAdapter, logger: Logger): StorageAdapter {
   const log = logger.child({ component: "sync" });
   let blocksProcessed = 0;
   let eventsSinceLastSummary = 0;
-  const eventCountsSinceLastSummary: Record<string, number> = {};
+  const tableCountsSinceLastSummary: Record<string, number> = {};
 
   return async (block: StorageAdapterBlock): Promise<void> => {
     const { blockNumber, logs } = block;
 
     if (logs.length > 0) {
-      const eventCounts: Record<string, number> = {};
+      const tableCounts: Record<string, number> = {};
       for (const entry of logs) {
-        const name = entry.eventName ?? "unknown";
-        eventCounts[name] = (eventCounts[name] ?? 0) + 1;
-        eventCountsSinceLastSummary[name] = (eventCountsSinceLastSummary[name] ?? 0) + 1;
+        const table = tableLabel(entry.args.tableId);
+        tableCounts[table] = (tableCounts[table] ?? 0) + 1;
+        tableCountsSinceLastSummary[table] = (tableCountsSinceLastSummary[table] ?? 0) + 1;
       }
 
-      log.debug("block processed", { blockNumber, events: logs.length, eventCounts });
+      log.info("block processed", { blockNumber, events: logs.length, tables: tableCounts });
     }
 
     eventsSinceLastSummary += logs.length;
@@ -29,10 +35,10 @@ export function createLoggingStorageAdapter(inner: StorageAdapter, logger: Logge
         blockNumber,
         blocksProcessed,
         eventsSinceLast: eventsSinceLastSummary,
-        eventCounts: { ...eventCountsSinceLastSummary },
+        tables: { ...tableCountsSinceLastSummary },
       });
       eventsSinceLastSummary = 0;
-      for (const key in eventCountsSinceLastSummary) delete eventCountsSinceLastSummary[key];
+      for (const key in tableCountsSinceLastSummary) delete tableCountsSinceLastSummary[key];
     }
 
     return inner(block);

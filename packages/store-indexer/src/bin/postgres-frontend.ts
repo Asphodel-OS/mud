@@ -18,7 +18,6 @@ import { metrics } from "../koa-middleware/metrics";
 import { logsLive } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
 import { createLeaderboardCache } from "../postgres/aggregateCache";
-import { createSupabasePublisher } from "../postgres/supabasePublisher";
 import { logger } from "../logger";
 import packageJson from "../../package.json";
 
@@ -36,17 +35,6 @@ const env = parseEnv(
       // CDN base for taruchi sprite URLs in leaderboard responses. Env-driven so
       // the indexer isn't coupled to a hardcoded (test) CDN.
       TARUCHI_CDN_BASE: z.string().default("https://i.test.kamigotchi.io/taruchi"),
-      // Supabase mirror: when enabled, finished festivals are projected into the
-      // Supabase tournament_results + announcements tables (service-role write).
-      // Off by default so a default deploy is behaviour-equivalent to today.
-      SUPABASE_URL: z.string().optional(),
-      SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
-      // Explicit string parse, NOT z.coerce.boolean() — the latter coerces any
-      // non-empty string (incl. "false") to true. Only "true"/"1" enable it.
-      PUBLISH_RESULTS_TO_SUPABASE: z
-        .string()
-        .optional()
-        .transform((v) => v === "true" || v === "1"),
     }),
   ),
 );
@@ -70,16 +58,6 @@ const leaderboardCache = createLeaderboardCache(database, {
   cdnBase: env.TARUCHI_CDN_BASE,
 });
 leaderboardCache.start(storedBlockLogs$);
-
-// Supabase publisher: mirrors finished festivals into Supabase on the same
-// debounced block ticks. No-op unless PUBLISH_RESULTS_TO_SUPABASE is set and
-// both Supabase creds are present.
-const supabasePublisher = createSupabasePublisher({
-  supabaseUrl: env.SUPABASE_URL,
-  serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-  enabled: env.PUBLISH_RESULTS_TO_SUPABASE,
-});
-supabasePublisher.start(database, env.STORE_ADDRESS, storedBlockLogs$);
 
 const server = new Koa();
 

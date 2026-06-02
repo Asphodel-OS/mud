@@ -21,6 +21,8 @@ import { createReorgSafeStorageAdapter } from "../postgres/createReorgSafeStorag
 import { createLoggingStorageAdapter } from "../createLoggingStorageAdapter";
 import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
+import { createSupabasePushAdapter } from "../postgres/supabasePush";
+import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
 import { logger } from "../logger";
 import packageJson from "../../package.json";
 
@@ -33,6 +35,17 @@ const env = parseEnv(
       HEALTHCHECK_PORT: z.coerce.number().optional(),
       SENTRY_DSN: z.string().optional(),
       SQS_QUEUE_URL: z.string().optional(),
+      // Supabase mirror: when enabled, finished festivals are projected into the
+      // Supabase tournament_results + announcements tables (service-role write).
+      // Off by default so a default deploy is behaviour-equivalent to today.
+      SUPABASE_URL: z.string().optional(),
+      SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+      // Explicit string parse, NOT z.coerce.boolean() — the latter coerces any
+      // non-empty string (incl. "false") to true. Only "true"/"1" enable it.
+      PUBLISH_RESULTS_TO_SUPABASE: z
+        .string()
+        .optional()
+        .transform((v) => v === "true" || v === "1"),
     }),
   ),
 );
@@ -51,6 +64,21 @@ const database = drizzle(
 
 let isCaughtUp = false;
 let healthcheckStarted = false;
+
+// Supabase push funnel: a storage-adapter decorator (same shape as the SQS
+// reveal hook) that, after each block's durable write lands, runs its projectors
+// against the block's logs. The tourney-announcement projector captures finished
+// festivals straight from the chain (no DB read) and mirrors them into Supabase.
+// Lives in the indexer (the writer) so it sees the raw logs and never races
+// horizontally-scaled frontend replicas. No-op unless the flag + creds are set.
+// Announcements are gated on isCaughtUp so historical catch-up doesn't spam chat.
+const supabasePush = createSupabasePushAdapter({
+  enabled: env.PUBLISH_RESULTS_TO_SUPABASE,
+  supabaseUrl: env.SUPABASE_URL,
+  serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  isCaughtUp: () => isCaughtUp,
+  projectors: [createTourneyAnnouncementProjector()],
+});
 
 async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Promise<bigint> {
   try {
@@ -76,7 +104,10 @@ async function startSync(): Promise<void> {
   const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
 
   const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);
-  const sqsAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(loggingAdapter, env.SQS_QUEUE_URL) : loggingAdapter;
+  // Supabase push funnel wraps the write so its projectors see each block's
+  // logs after the durable write lands; pass-through when disabled.
+  const supabaseAdapter = supabasePush.wrap(loggingAdapter);
+  const sqsAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(supabaseAdapter, env.SQS_QUEUE_URL) : supabaseAdapter;
 
   const finalAdapter = env.REORG_SAFE
     ? await createReorgSafeStorageAdapter({

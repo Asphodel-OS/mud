@@ -184,8 +184,8 @@ describe("buildAggregate", () => {
     expect(fromOverall).toBe(fromWallet);
   });
 
-  it("onyxWon is NET ONYX (earnings minus entry fees) with 2dp precision", () => {
-    // Duel, bracket=1 (rookie, 2 ONYX entry), 0 fees: winner nets +2, loser nets −2.
+  it("duels are free: no ONYX spent or won by either side", () => {
+    // Duel, bracket=1 (rookie). Duels cost 0 ONYX: no entry, no prize.
     const cores = [mkCore(1n, "0xAAA", 10), mkCore(2n, "0xBBB", 20)];
     const duels = [mkDuel(100n, 1, 10, 20)];
     const results = [mkResult(100n, 10, 20)];
@@ -206,12 +206,10 @@ describe("buildAggregate", () => {
 
     const winner = out.overall.find((r) => r.wallet === "0xaaa")!;
     const loser = out.overall.find((r) => r.wallet === "0xbbb")!;
-    // winner: pool 4, took all, paid 2 → net +2
-    expect(winner.onyxWon).toBe(2);
-    expect(winner.onyxSpent).toBe(2);
-    // loser: won 0, paid 2 → net −2
-    expect(loser.onyxWon).toBe(-2);
-    expect(loser.onyxSpent).toBe(2);
+    expect(winner.onyxWon).toBe(0);
+    expect(winner.onyxSpent).toBe(0);
+    expect(loser.onyxWon).toBe(0);
+    expect(loser.onyxSpent).toBe(0);
   });
 
   it("aggregates festival diagram placements correctly (L11 placement-3 = 9 ONYX)", () => {

@@ -64,9 +64,9 @@ const NUM_PLAYERS = 8;
 // =============================================================================
 
 export const ENTRY_FEES: Record<number, bigint> = {
-  1: parseEther("2"), // ROOKIE
-  2: parseEther("5"), // VETERAN
-  3: parseEther("10"), // CHAMPION
+  1: parseEther("0"), // ROOKIE   - duels are free (gas only)
+  2: parseEther("0"), // VETERAN  - duels are free
+  3: parseEther("0"), // CHAMPION - duels are free
   4: parseEther("5"), // ROOKIE_FESTIVAL   (GDD §10.1: festival entry above duel)
   5: parseEther("10"), // VETERAN_FESTIVAL  (GDD §10.1)
   6: parseEther("15"), // CHAMPION_FESTIVAL (GDD §10.1)

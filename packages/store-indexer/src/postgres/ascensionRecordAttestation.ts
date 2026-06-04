@@ -1,10 +1,11 @@
-import type { Address, Hex } from "viem";
+import { getAddress, isAddress, type Address, type Hex } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import type { LeaderboardAggregate } from "../leaderboard/types";
 
 export const ASCENSION_RECORD_TYPES = {
   AscensionRecord: [
     { name: "taruchiID", type: "uint256" },
+    { name: "claimant", type: "address" },
     { name: "wins", type: "uint32" },
     { name: "losses", type: "uint32" },
     { name: "deadline", type: "uint64" },
@@ -13,6 +14,7 @@ export const ASCENSION_RECORD_TYPES = {
 
 export type AscensionRecord = {
   taruchiId: bigint;
+  claimant: Address;
   wins: number;
   losses: number;
 };
@@ -21,6 +23,7 @@ export type AscensionRecordLookup =
   | { status: "ok"; record: AscensionRecord }
   | { status: "not-ascended" }
   | { status: "record-missing" }
+  | { status: "claimant-mismatch"; owner: string; claimant: Address }
   | { status: "record-out-of-range"; wins: number; losses: number };
 
 export function isIndexerCaughtUp(indexedBlock: bigint, headBlock: bigint, maxLagBlocks: bigint): boolean {
@@ -32,13 +35,19 @@ export function parseTaruchiIdParam(raw: string | undefined): bigint | null {
   return BigInt(raw);
 }
 
+export function parseClaimantParam(raw: string | undefined): Address | null {
+  if (!raw || !isAddress(raw)) return null;
+  return getAddress(raw);
+}
+
 export function lookupAscensionRecord(
   aggregate: LeaderboardAggregate,
   taruchiId: bigint,
   chainId: number,
+  claimant: Address,
 ): AscensionRecordLookup {
   const taruchiKey = taruchiId.toString();
-  const ascended = aggregate.ascended.some((row) => row.taruchiId === taruchiId);
+  const ascended = aggregate.ascended.find((row) => row.taruchiId === taruchiId);
   if (!ascended) return { status: "not-ascended" };
 
   const row = aggregate.byTaruchi.get(taruchiKey);
@@ -46,15 +55,18 @@ export function lookupAscensionRecord(
   const losses = row?.losses ?? 0;
 
   if (!row && chainId !== 31337) return { status: "record-missing" };
+  const owner = (row?.ownerWallet ?? ascended.wallet).toLowerCase();
+  if (owner !== claimant.toLowerCase()) return { status: "claimant-mismatch", owner, claimant };
   if (!isUint32(wins) || !isUint32(losses)) return { status: "record-out-of-range", wins, losses };
 
-  return { status: "ok", record: { taruchiId, wins, losses } };
+  return { status: "ok", record: { taruchiId, claimant, wins, losses } };
 }
 
 export function buildAscensionRecordTypedData(args: {
   chainId: number;
   worldAddress: Address;
   taruchiId: bigint;
+  claimant: Address;
   wins: number;
   losses: number;
   deadline: bigint;
@@ -69,6 +81,7 @@ export function buildAscensionRecordTypedData(args: {
   primaryType: "AscensionRecord";
   message: {
     taruchiID: bigint;
+    claimant: Address;
     wins: number;
     losses: number;
     deadline: bigint;
@@ -85,6 +98,7 @@ export function buildAscensionRecordTypedData(args: {
     primaryType: "AscensionRecord" as const,
     message: {
       taruchiID: args.taruchiId,
+      claimant: args.claimant,
       wins: args.wins,
       losses: args.losses,
       deadline: args.deadline,
@@ -104,6 +118,7 @@ export async function signAscensionRecord(args: {
       chainId: args.chainId,
       worldAddress: args.worldAddress,
       taruchiId: args.record.taruchiId,
+      claimant: args.record.claimant,
       wins: args.record.wins,
       losses: args.record.losses,
       deadline: args.deadline,

@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
-import { recoverTypedDataAddress, type Address } from "viem";
+import { getAddress, recoverTypedDataAddress, type Address } from "viem";
 import { EMPTY_AGGREGATE, type LeaderboardAggregate } from "../leaderboard/types";
 import {
   buildAscensionRecordTypedData,
   isIndexerCaughtUp,
   lookupAscensionRecord,
+  parseClaimantParam,
   parseTaruchiIdParam,
   signAscensionRecord,
 } from "./ascensionRecordAttestation";
 
 const worldAddress = "0x000000000000000000000000000000000000beef" as Address;
+const claimant = getAddress("0x0000000000000000000000000000000000000abc");
+const otherClaimant = getAddress("0x0000000000000000000000000000000000000def");
 const signer = privateKeyToAccount("0x000000000000000000000000000000000000000000000000000000000000a5ce");
 
 function aggregateWithAscended(row?: { wins: number; losses: number }): LeaderboardAggregate {
@@ -24,7 +27,7 @@ function aggregateWithAscended(row?: { wins: number; losses: number }): Leaderbo
             {
               taruchiId,
               taruchiIndex: 11,
-              ownerWallet: "0xabc",
+              ownerWallet: claimant.toLowerCase(),
               name: "Taruchi #11",
               state: 4,
               imageUrl: "/t.png",
@@ -44,7 +47,7 @@ function aggregateWithAscended(row?: { wins: number; losses: number }): Leaderbo
       {
         taruchiId,
         taruchiIndex: 11,
-        wallet: "0xabc",
+        wallet: claimant.toLowerCase(),
         name: "Taruchi #11",
         affinity: "Normal",
         ascendedAt: 0,
@@ -61,6 +64,12 @@ describe("ascensionRecordAttestation", () => {
     expect(parseTaruchiIdParam("../123")).toBeNull();
   });
 
+  it("parses claimant addresses only", () => {
+    expect(parseClaimantParam(claimant.toLowerCase())).toBe(claimant);
+    expect(parseClaimantParam("0xabc")).toBeNull();
+    expect(parseClaimantParam(undefined)).toBeNull();
+  });
+
   it("checks indexed block freshness against RPC head", () => {
     expect(isIndexerCaughtUp(100n, 100n, 0n)).toBe(true);
     expect(isIndexerCaughtUp(99n, 100n, 0n)).toBe(false);
@@ -68,23 +77,31 @@ describe("ascensionRecordAttestation", () => {
   });
 
   it("returns the per-taruchi leaderboard record for ascended tarus", () => {
-    const lookup = lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1);
-    expect(lookup).toEqual({ status: "ok", record: { taruchiId: 11n, wins: 7, losses: 2 } });
+    const lookup = lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, claimant);
+    expect(lookup).toEqual({ status: "ok", record: { taruchiId: 11n, claimant, wins: 7, losses: 2 } });
   });
 
   it("refuses to sign missing records on non-local chains", () => {
-    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 1)).toEqual({ status: "record-missing" });
+    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 1, claimant)).toEqual({ status: "record-missing" });
   });
 
   it("allows a zero record for local dev ascensions", () => {
-    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 31337)).toEqual({
+    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 31337, claimant)).toEqual({
       status: "ok",
-      record: { taruchiId: 11n, wins: 0, losses: 0 },
+      record: { taruchiId: 11n, claimant, wins: 0, losses: 0 },
+    });
+  });
+
+  it("refuses records for non-owner claimants", () => {
+    expect(lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, otherClaimant)).toEqual({
+      status: "claimant-mismatch",
+      owner: claimant.toLowerCase(),
+      claimant: otherClaimant,
     });
   });
 
   it("signs typed data recoverable to the configured signer", async () => {
-    const record = { taruchiId: 11n, wins: 7, losses: 2 };
+    const record = { taruchiId: 11n, claimant, wins: 7, losses: 2 };
     const deadline = 1_800_000_000n;
     const signature = await signAscensionRecord({
       signer,
@@ -98,6 +115,7 @@ describe("ascensionRecordAttestation", () => {
         chainId: 31337,
         worldAddress,
         taruchiId: record.taruchiId,
+        claimant: record.claimant,
         wins: record.wins,
         losses: record.losses,
         deadline,

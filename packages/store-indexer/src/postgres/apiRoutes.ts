@@ -17,6 +17,7 @@ import type { LeaderboardCache } from "./aggregateCache";
 import {
   isIndexerCaughtUp,
   lookupAscensionRecord,
+  parseClaimantParam,
   parseTaruchiIdParam,
   signAscensionRecord,
 } from "./ascensionRecordAttestation";
@@ -125,8 +126,9 @@ export function apiRoutes(
   });
 
   // Fresh signed W/L record for ascension NFT claims. This uses the same
-  // aggregate as Rankings/TFC (duels + Festival sub-battles), but forces an
-  // immediate rebuild and refuses to sign if the decoded DB is behind RPC head.
+  // aggregate as Rankings/TFC (duels + Festival sub-battles), binds the
+  // signature to the current indexed owner, forces an immediate rebuild, and
+  // refuses to sign if the decoded DB is behind RPC head.
   router.get("/api/taruchi/:taruchiId/ascension-record-attestation", compress(), async (ctx) => {
     if (!ascensionAttestation?.signer || !ascensionAttestation.publicClient) {
       jsonResponse(ctx, 503, { error: "ascension attestation signer not configured" });
@@ -136,6 +138,11 @@ export function apiRoutes(
     const taruchiId = parseTaruchiIdParam(String(ctx.params.taruchiId ?? ""));
     if (taruchiId === null) {
       jsonResponse(ctx, 400, { error: "invalid taruchi id" });
+      return;
+    }
+    const claimant = parseClaimantParam(typeof ctx.query.claimant === "string" ? ctx.query.claimant : undefined);
+    if (claimant === null) {
+      jsonResponse(ctx, 400, { error: "invalid claimant address" });
       return;
     }
 
@@ -189,13 +196,21 @@ export function apiRoutes(
       return;
     }
 
-    const lookup = lookupAscensionRecord(leaderboardCache.getAggregate(), taruchiId, chainIdNumber);
+    const lookup = lookupAscensionRecord(leaderboardCache.getAggregate(), taruchiId, chainIdNumber, claimant);
     if (lookup.status === "not-ascended") {
       jsonResponse(ctx, 404, { error: "taruchi is not ascended in indexed state" });
       return;
     }
     if (lookup.status === "record-missing") {
       jsonResponse(ctx, 409, { error: "ascended taruchi record is missing from aggregate" });
+      return;
+    }
+    if (lookup.status === "claimant-mismatch") {
+      jsonResponse(ctx, 403, {
+        error: "claimant is not the indexed taruchi owner",
+        owner: lookup.owner,
+        claimant: lookup.claimant,
+      });
       return;
     }
     if (lookup.status === "record-out-of-range") {
@@ -250,9 +265,10 @@ export function apiRoutes(
 
     jsonResponse(ctx, 200, {
       taruchiId: lookup.record.taruchiId,
+      claimant: lookup.record.claimant,
       wins: lookup.record.wins,
       losses: lookup.record.losses,
-      deadline: Number(deadline),
+      deadline,
       signature,
       signer: ascensionAttestation.signer.address,
       indexedBlock,

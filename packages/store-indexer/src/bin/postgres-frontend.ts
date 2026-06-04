@@ -36,8 +36,8 @@ const env = parseEnv(
       // CDN base for taruchi sprite URLs in leaderboard responses. Env-driven so
       // the indexer isn't coupled to a hardcoded (test) CDN.
       TARUCHI_CDN_BASE: z.string().default("https://i.test.kamigotchi.io/taruchi"),
-      // Optional: enables /api/taruchi/:id/ascension-record-attestation. When set,
-      // RPC_HTTP_URL is required so the endpoint can refuse stale indexer state.
+      // Optional: enables /api/taruchi/:id/ascension-record-attestation?claimant=0x...
+      // When set, RPC_HTTP_URL is required so the endpoint can refuse stale indexer state.
       RPC_HTTP_URL: z.string().optional(),
       ASCENSION_RECORD_SIGNER_PRIVATE_KEY: z
         .string()

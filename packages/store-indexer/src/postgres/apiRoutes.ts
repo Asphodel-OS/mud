@@ -4,6 +4,9 @@ import Router from "@koa/router";
 import compose from "koa-compose";
 import { input } from "@latticexyz/store-sync/indexer-client";
 import { schemasTable } from "@latticexyz/store-sync";
+import { transformSchemaName } from "@latticexyz/store-sync/postgres";
+import type { Address, PublicClient } from "viem";
+import type { PrivateKeyAccount } from "viem/accounts";
 import { queryLogs } from "./queryLogs";
 import { recordToLog } from "./recordToLog";
 import { debug, error } from "../debug";
@@ -11,15 +14,55 @@ import { logger } from "../logger";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
 import type { LeaderboardCache } from "./aggregateCache";
+import {
+  isIndexerCaughtUp,
+  lookupAscensionRecord,
+  parseTaruchiIdParam,
+  signAscensionRecord,
+} from "./ascensionRecordAttestation";
 
 const log = logger.child({ component: "api-logs" });
+const mudSchemaName = transformSchemaName("mud");
+
+type AscensionRecordAttestationOptions = {
+  signer?: PrivateKeyAccount;
+  publicClient?: PublicClient;
+  worldAddress: Address;
+  ttlSeconds: number;
+  maxLagBlocks: bigint;
+};
+
+type IndexerStateRow = {
+  chainId: string;
+  indexedBlock: string;
+};
 
 // bigint-safe JSON: ids serialize to strings. The cache's byWallet/byTaruchi
 // Maps are never passed in here (we send plain arrays only).
 const jsonBigint = (value: unknown): string =>
   JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
 
-export function apiRoutes(database: Sql, leaderboardCache: LeaderboardCache): Middleware {
+function jsonResponse(ctx: Parameters<Middleware>[0], status: number, body: unknown): void {
+  ctx.status = status;
+  ctx.set("Content-Type", "application/json");
+  ctx.body = jsonBigint(body);
+}
+
+async function getIndexerState(database: Sql): Promise<{ chainId: bigint; indexedBlock: bigint }> {
+  const rows = await database<IndexerStateRow[]>`
+    SELECT chain_id AS "chainId", block_number AS "indexedBlock"
+    FROM ${database(`${mudSchemaName}.config`)}
+    LIMIT 1
+  `;
+  if (rows.length === 0) throw new Error("indexer config row missing");
+  return { chainId: BigInt(rows[0].chainId), indexedBlock: BigInt(rows[0].indexedBlock) };
+}
+
+export function apiRoutes(
+  database: Sql,
+  leaderboardCache: LeaderboardCache,
+  ascensionAttestation?: AscensionRecordAttestationOptions,
+): Middleware {
   const router = new Router();
 
   // Server-side aggregated leaderboard (trainers + per-taruchi + ascended).
@@ -77,6 +120,143 @@ export function apiRoutes(database: Sql, leaderboardCache: LeaderboardCache): Mi
     ctx.body = jsonBigint({
       wallet: wallet.toLowerCase(),
       battles: leaderboardCache.getBattles(wallet),
+      computedAt: leaderboardCache.computedAt(),
+    });
+  });
+
+  // Fresh signed W/L record for ascension NFT claims. This uses the same
+  // aggregate as Rankings/TFC (duels + Festival sub-battles), but forces an
+  // immediate rebuild and refuses to sign if the decoded DB is behind RPC head.
+  router.get("/api/taruchi/:taruchiId/ascension-record-attestation", compress(), async (ctx) => {
+    if (!ascensionAttestation?.signer || !ascensionAttestation.publicClient) {
+      jsonResponse(ctx, 503, { error: "ascension attestation signer not configured" });
+      return;
+    }
+
+    const taruchiId = parseTaruchiIdParam(String(ctx.params.taruchiId ?? ""));
+    if (taruchiId === null) {
+      jsonResponse(ctx, 400, { error: "invalid taruchi id" });
+      return;
+    }
+
+    try {
+      await leaderboardCache.rebuildNow();
+    } catch (e) {
+      log.error("ascension attestation aggregate rebuild failed", {
+        taruchiId: taruchiId.toString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      jsonResponse(ctx, 503, { error: "leaderboard aggregate rebuild failed" });
+      return;
+    }
+
+    if (!leaderboardCache.isReady()) {
+      jsonResponse(ctx, 503, { error: "leaderboard cache warming up" });
+      return;
+    }
+
+    let chainId: bigint;
+    let indexedBlock: bigint;
+    let headBlock: bigint;
+    try {
+      const state = await getIndexerState(database);
+      chainId = state.chainId;
+      indexedBlock = state.indexedBlock;
+      headBlock = await ascensionAttestation.publicClient.getBlockNumber();
+    } catch (e) {
+      log.error("ascension attestation freshness check failed", {
+        taruchiId: taruchiId.toString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      jsonResponse(ctx, 503, { error: "indexer freshness check failed" });
+      return;
+    }
+
+    const lag = headBlock > indexedBlock ? headBlock - indexedBlock : 0n;
+    if (!isIndexerCaughtUp(indexedBlock, headBlock, ascensionAttestation.maxLagBlocks)) {
+      jsonResponse(ctx, 409, {
+        error: `indexer lagging behind RPC head by ${lag.toString()} block(s)`,
+        indexedBlock,
+        headBlock,
+        maxLagBlocks: ascensionAttestation.maxLagBlocks,
+      });
+      return;
+    }
+
+    const chainIdNumber = Number(chainId);
+    if (!Number.isSafeInteger(chainIdNumber)) {
+      jsonResponse(ctx, 500, { error: "indexed chain id is not safely representable" });
+      return;
+    }
+
+    const lookup = lookupAscensionRecord(leaderboardCache.getAggregate(), taruchiId, chainIdNumber);
+    if (lookup.status === "not-ascended") {
+      jsonResponse(ctx, 404, { error: "taruchi is not ascended in indexed state" });
+      return;
+    }
+    if (lookup.status === "record-missing") {
+      jsonResponse(ctx, 409, { error: "ascended taruchi record is missing from aggregate" });
+      return;
+    }
+    if (lookup.status === "record-out-of-range") {
+      jsonResponse(ctx, 409, {
+        error: "ascension record is outside uint32 range",
+        wins: lookup.wins,
+        losses: lookup.losses,
+      });
+      return;
+    }
+
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + ascensionAttestation.ttlSeconds);
+    let signature: `0x${string}`;
+    try {
+      signature = await signAscensionRecord({
+        signer: ascensionAttestation.signer,
+        chainId: chainIdNumber,
+        worldAddress: ascensionAttestation.worldAddress,
+        record: lookup.record,
+        deadline,
+      });
+    } catch (e) {
+      log.error("ascension record signing failed", {
+        taruchiId: taruchiId.toString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      jsonResponse(ctx, 500, { error: "ascension record signing failed" });
+      return;
+    }
+
+    try {
+      const postSignHeadBlock = await ascensionAttestation.publicClient.getBlockNumber();
+      const postSignLag = postSignHeadBlock > indexedBlock ? postSignHeadBlock - indexedBlock : 0n;
+      if (!isIndexerCaughtUp(indexedBlock, postSignHeadBlock, ascensionAttestation.maxLagBlocks)) {
+        jsonResponse(ctx, 409, {
+          error: `indexer lagging behind RPC head by ${postSignLag.toString()} block(s)`,
+          indexedBlock,
+          headBlock: postSignHeadBlock,
+          maxLagBlocks: ascensionAttestation.maxLagBlocks,
+        });
+        return;
+      }
+      headBlock = postSignHeadBlock;
+    } catch (e) {
+      log.error("ascension attestation post-sign freshness check failed", {
+        taruchiId: taruchiId.toString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      jsonResponse(ctx, 503, { error: "indexer freshness check failed" });
+      return;
+    }
+
+    jsonResponse(ctx, 200, {
+      taruchiId: lookup.record.taruchiId,
+      wins: lookup.record.wins,
+      losses: lookup.record.losses,
+      deadline: Number(deadline),
+      signature,
+      signer: ascensionAttestation.signer.address,
+      indexedBlock,
+      headBlock,
       computedAt: leaderboardCache.computedAt(),
     });
   });

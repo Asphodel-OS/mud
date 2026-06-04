@@ -97,6 +97,8 @@ export interface LeaderboardCache {
   /** The wallet's finished matches (newest first) for the Mine archive. */
   getBattles(wallet: string): MatchSummary[];
   computedAt(): number;
+  /** Force an immediate rebuild and await it. Used by signing paths that cannot serve a debounced snapshot. */
+  rebuildNow(): Promise<void>;
   /** Wire a recompute to a block stream (debounced) + kick the first build. */
   start(block$: Observable<unknown>): void;
   stop(): void;
@@ -130,6 +132,7 @@ export function createLeaderboardCache(
   let state: CacheState = EMPTY_STATE;
   let ready = false;
   let building = false;
+  let buildPromise: Promise<void> | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
   let sub: Subscription | undefined;
   let stopped = false;
@@ -277,34 +280,60 @@ export function createLeaderboardCache(
     return { aggregate, rosterByOwner, matchesByOwner, computedAt: Date.now() };
   }
 
+  async function commitFreshBuild(startedAt: number): Promise<void> {
+    const next = await fetchAndBuild();
+    state = next;
+    ready = true;
+    log.info("aggregate rebuilt", {
+      elapsedMs: Date.now() - startedAt,
+      wallets: next.aggregate.overall.length,
+      tarus: next.aggregate.overallByTaruchi.length,
+      owners: next.rosterByOwner.size,
+      records: next.aggregate.recordCount,
+    });
+  }
+
   async function rebuild(): Promise<void> {
-    if (building || stopped) return;
+    if (stopped) return;
+    if (buildPromise) return buildPromise;
     building = true;
-    const startedAt = Date.now();
-    try {
-      const next = await fetchAndBuild();
-      state = next;
-      ready = true;
-      log.info("aggregate rebuilt", {
-        elapsedMs: Date.now() - startedAt,
-        wallets: next.aggregate.overall.length,
-        tarus: next.aggregate.overallByTaruchi.length,
-        owners: next.rosterByOwner.size,
-        records: next.aggregate.recordCount,
-      });
-    } catch (e) {
-      log.error("aggregate rebuild failed; will retry", { error: e instanceof Error ? e.message : String(e) });
-      if (!stopped) {
-        // fallback retry, independent of the block-driven debounce
-        if (pendingTimer) clearTimeout(pendingTimer);
-        pendingTimer = setTimeout(() => {
-          pendingTimer = undefined;
-          void rebuild();
-        }, retryMs);
+    buildPromise = (async (): Promise<void> => {
+      const startedAt = Date.now();
+      try {
+        await commitFreshBuild(startedAt);
+      } catch (e) {
+        log.error("aggregate rebuild failed; will retry", { error: e instanceof Error ? e.message : String(e) });
+        if (!stopped) {
+          // fallback retry, independent of the block-driven debounce
+          if (pendingTimer) clearTimeout(pendingTimer);
+          pendingTimer = setTimeout(() => {
+            pendingTimer = undefined;
+            void rebuild();
+          }, retryMs);
+        }
+      } finally {
+        building = false;
+        buildPromise = undefined;
       }
-    } finally {
-      building = false;
-    }
+    })();
+    return buildPromise;
+  }
+
+  async function rebuildNow(): Promise<void> {
+    if (stopped) return;
+    if (buildPromise) await buildPromise;
+    if (stopped) return;
+
+    building = true;
+    buildPromise = (async (): Promise<void> => {
+      try {
+        await commitFreshBuild(Date.now());
+      } finally {
+        building = false;
+        buildPromise = undefined;
+      }
+    })();
+    return buildPromise;
   }
 
   // Coalesce block-driven rebuilds to at most one per debounce window.
@@ -323,6 +352,7 @@ export function createLeaderboardCache(
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
     getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
     computedAt: () => state.computedAt,
+    rebuildNow,
     start: (block$): void => {
       void rebuild(); // immediate build on startup
       sub = block$.subscribe({

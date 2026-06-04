@@ -56,6 +56,8 @@ Note that you only need one of `RPC_HTTP_URL` or `RPC_WS_URL`, but we recommend 
 | `ASCENSION_RECORD_ATTESTATION_TTL_SECONDS` | Unix-time validity window for each signed record                                            | `120`   |
 | `ASCENSION_RECORD_MAX_LAG_BLOCKS`          | Maximum allowed lag between indexed block and RPC head before refusing to sign              | `0`     |
 
+The signer public address must match the game2 contracts `ASCENSION_RECORD_SIGNER_ADDRESS`. It only signs off-chain vouchers and does not pay claim gas.
+
 ### Postgres indexer environment variables
 
 | Variable           | Description                                         | Default |

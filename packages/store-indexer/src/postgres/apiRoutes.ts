@@ -26,8 +26,8 @@ const log = logger.child({ component: "api-logs" });
 const mudSchemaName = transformSchemaName("mud");
 
 type AscensionRecordAttestationOptions = {
-  signer?: PrivateKeyAccount;
-  publicClient?: PublicClient;
+  signer: PrivateKeyAccount;
+  publicClient: PublicClient;
   worldAddress: Address;
   ttlSeconds: number;
   maxLagBlocks: bigint;
@@ -116,8 +116,13 @@ function checkRateLimit(
 }
 
 function requestIdentity(ctx: Parameters<Middleware>[0]): string {
-  const forwardedFor = ctx.get("x-forwarded-for").split(",")[0]?.trim();
-  return forwardedFor || ctx.ip || ctx.request.ip || "unknown";
+  const forwardedForParts = ctx
+    .get("x-forwarded-for")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const proxyAppendedIp = forwardedForParts[forwardedForParts.length - 1];
+  return proxyAppendedIp || ctx.ip || ctx.request.ip || "unknown";
 }
 
 export function apiRoutes(
@@ -193,7 +198,7 @@ export function apiRoutes(
   // signature to the current indexed owner, forces an immediate rebuild, and
   // refuses to sign if the decoded DB is behind RPC head.
   router.get("/api/taruchi/:taruchiId/ascension-record-attestation", compress(), async (ctx) => {
-    if (!ascensionAttestation?.signer || !ascensionAttestation.publicClient) {
+    if (!ascensionAttestation) {
       jsonResponse(ctx, 503, { error: "ascension attestation signer not configured" });
       return;
     }
@@ -377,15 +382,21 @@ export function apiRoutes(
         });
         return;
       }
-      if (leaderboardCache.indexedBlock() !== postSignState.indexedBlock) {
+      // The signature covers the record, not a block number. Refuse if either
+      // the decoded DB or cache moved after lookup/signing.
+      const currentAggregateIndexedBlock = leaderboardCache.indexedBlock();
+      if (
+        currentAggregateIndexedBlock !== aggregateIndexedBlock ||
+        postSignState.indexedBlock !== aggregateIndexedBlock
+      ) {
         jsonResponse(ctx, 409, {
           error: "leaderboard aggregate changed during ascension attestation; retry",
-          aggregateIndexedBlock: leaderboardCache.indexedBlock(),
+          aggregateIndexedBlock: currentAggregateIndexedBlock,
+          signedAggregateIndexedBlock: aggregateIndexedBlock,
           indexedBlock: postSignState.indexedBlock,
         });
         return;
       }
-      indexedBlock = postSignState.indexedBlock;
       headBlock = postSignHeadBlock;
     } catch (e) {
       log.error("ascension attestation post-sign freshness check failed", {
@@ -404,7 +415,7 @@ export function apiRoutes(
       deadline,
       signature,
       signer: ascensionAttestation.signer.address,
-      indexedBlock,
+      indexedBlock: aggregateIndexedBlock,
       headBlock,
       computedAt: leaderboardCache.computedAt(),
     });

@@ -1,6 +1,7 @@
 import { Sql } from "postgres";
 import { Observable, Subscription } from "rxjs";
 import { hexToString, type Hex } from "viem";
+import { transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { buildAggregate } from "../leaderboard/buildAggregate";
 import { unpackU32 } from "../leaderboard/packUtils";
 import { positionToPlacement } from "../leaderboard/tourneyMath";
@@ -13,6 +14,7 @@ import { EMPTY_AGGREGATE, type LeaderboardAggregate, type LeaderboardRow } from 
 import { logger } from "../logger";
 
 const log = logger.child({ component: "leaderboard-cache" });
+const mudSchemaName = transformSchemaName("mud");
 
 // ── Server-side adapters (NOT part of the ported game2 closure) ─────────────
 // game2 injects spriteFor / decodeName into buildAggregate; we supply server
@@ -97,6 +99,10 @@ export interface LeaderboardCache {
   /** The wallet's finished matches (newest first) for the Mine archive. */
   getBattles(wallet: string): MatchSummary[];
   computedAt(): number;
+  /** MUD config block used by the current aggregate; null until first successful build. */
+  indexedBlock(): bigint | null;
+  /** Force an immediate rebuild and await it. Used by signing paths that cannot serve a debounced snapshot. */
+  rebuildNow(): Promise<void>;
   /** Wire a recompute to a block stream (debounced) + kick the first build. */
   start(block$: Observable<unknown>): void;
   stop(): void;
@@ -107,6 +113,7 @@ type CacheState = {
   rosterByOwner: Map<string, TrainerRosterEntry[]>;
   matchesByOwner: Map<string, MatchSummary[]>;
   computedAt: number;
+  indexedBlock: bigint | null;
 };
 
 const EMPTY_STATE: CacheState = {
@@ -114,6 +121,7 @@ const EMPTY_STATE: CacheState = {
   rosterByOwner: new Map(),
   matchesByOwner: new Map(),
   computedAt: 0,
+  indexedBlock: null,
 };
 
 export function createLeaderboardCache(
@@ -130,6 +138,8 @@ export function createLeaderboardCache(
   let state: CacheState = EMPTY_STATE;
   let ready = false;
   let building = false;
+  let buildPromise: Promise<void> | undefined;
+  let forcedBuildPromise: Promise<void> | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
   let sub: Subscription | undefined;
   let stopped = false;
@@ -138,7 +148,12 @@ export function createLeaderboardCache(
     // uint256/uint40 packed fields → ::text then BigInt; small ints → ::int → Number.
     // Decoded tables are schema-qualified by the lowercased store address;
     // sql(`schema.table`) quotes it as an identifier.
-    const [tourneyRows, duelRows, resultRows, coreRows, statusRows, nameRows] = await Promise.all([
+    const [configRows, tourneyRows, duelRows, resultRows, coreRows, statusRows, nameRows] = await Promise.all([
+      sql<{ indexedBlock: string }[]>`
+        SELECT block_number AS "indexedBlock"
+        FROM ${sql(`${mudSchemaName}.config`)}
+        LIMIT 1
+      `,
       sql`SELECT id::text AS id, players::text AS players, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__tourney`)}`,
       sql`SELECT id::text AS id, player_a_index::int AS a, player_b_index::int AS b, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__duel`)}`,
       sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
@@ -274,37 +289,78 @@ export function createLeaderboardCache(
     }
     for (const list of matchesByOwner.values()) list.sort((a, b) => b.time - a.time);
 
-    return { aggregate, rosterByOwner, matchesByOwner, computedAt: Date.now() };
+    return {
+      aggregate,
+      rosterByOwner,
+      matchesByOwner,
+      computedAt: Date.now(),
+      indexedBlock: configRows[0]?.indexedBlock ? BigInt(configRows[0].indexedBlock) : null,
+    };
+  }
+
+  async function commitFreshBuild(startedAt: number): Promise<void> {
+    const next = await fetchAndBuild();
+    state = next;
+    ready = true;
+    log.info("aggregate rebuilt", {
+      elapsedMs: Date.now() - startedAt,
+      indexedBlock: next.indexedBlock?.toString() ?? null,
+      wallets: next.aggregate.overall.length,
+      tarus: next.aggregate.overallByTaruchi.length,
+      owners: next.rosterByOwner.size,
+      records: next.aggregate.recordCount,
+    });
   }
 
   async function rebuild(): Promise<void> {
-    if (building || stopped) return;
+    if (stopped) return;
+    if (buildPromise) return buildPromise;
     building = true;
-    const startedAt = Date.now();
-    try {
-      const next = await fetchAndBuild();
-      state = next;
-      ready = true;
-      log.info("aggregate rebuilt", {
-        elapsedMs: Date.now() - startedAt,
-        wallets: next.aggregate.overall.length,
-        tarus: next.aggregate.overallByTaruchi.length,
-        owners: next.rosterByOwner.size,
-        records: next.aggregate.recordCount,
-      });
-    } catch (e) {
-      log.error("aggregate rebuild failed; will retry", { error: e instanceof Error ? e.message : String(e) });
-      if (!stopped) {
-        // fallback retry, independent of the block-driven debounce
-        if (pendingTimer) clearTimeout(pendingTimer);
-        pendingTimer = setTimeout(() => {
-          pendingTimer = undefined;
-          void rebuild();
-        }, retryMs);
+    buildPromise = (async (): Promise<void> => {
+      const startedAt = Date.now();
+      try {
+        await commitFreshBuild(startedAt);
+      } catch (e) {
+        log.error("aggregate rebuild failed; will retry", { error: e instanceof Error ? e.message : String(e) });
+        if (!stopped) {
+          // fallback retry, independent of the block-driven debounce
+          if (pendingTimer) clearTimeout(pendingTimer);
+          pendingTimer = setTimeout(() => {
+            pendingTimer = undefined;
+            void rebuild();
+          }, retryMs);
+        }
+      } finally {
+        building = false;
+        buildPromise = undefined;
       }
-    } finally {
-      building = false;
+    })();
+    return buildPromise;
+  }
+
+  async function rebuildNow(): Promise<void> {
+    if (stopped) return;
+    if (forcedBuildPromise) return forcedBuildPromise;
+    if (buildPromise) await buildPromise;
+    if (stopped) return;
+    if (forcedBuildPromise) return forcedBuildPromise;
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      pendingTimer = undefined;
     }
+
+    building = true;
+    buildPromise = (async (): Promise<void> => {
+      try {
+        await commitFreshBuild(Date.now());
+      } finally {
+        building = false;
+        buildPromise = undefined;
+        forcedBuildPromise = undefined;
+      }
+    })();
+    forcedBuildPromise = buildPromise;
+    return forcedBuildPromise;
   }
 
   // Coalesce block-driven rebuilds to at most one per debounce window.
@@ -323,6 +379,8 @@ export function createLeaderboardCache(
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
     getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
     computedAt: () => state.computedAt,
+    indexedBlock: () => state.indexedBlock,
+    rebuildNow,
     start: (block$): void => {
       void rebuild(); // immediate build on startup
       sub = block$.subscribe({

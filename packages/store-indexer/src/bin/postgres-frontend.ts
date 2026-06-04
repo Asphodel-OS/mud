@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { z } from "zod";
-import { isHex, type Hex } from "viem";
+import { createPublicClient, http, isAddress, isHex, type Address, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import Koa from "koa";
 import cors from "@koa/cors";
 import { createKoaMiddleware } from "trpc-koa-adapter";
@@ -35,9 +36,48 @@ const env = parseEnv(
       // CDN base for taruchi sprite URLs in leaderboard responses. Env-driven so
       // the indexer isn't coupled to a hardcoded (test) CDN.
       TARUCHI_CDN_BASE: z.string().default("https://i.test.kamigotchi.io/taruchi"),
+      // Optional: enables /api/taruchi/:id/ascension-record-attestation?claimant=0x...
+      // When set, RPC_HTTP_URL is required so the endpoint can refuse stale indexer state.
+      RPC_HTTP_URL: z.string().optional(),
+      ASCENSION_RECORD_SIGNER_PRIVATE_KEY: z
+        .string()
+        .optional()
+        .transform((input) => (input === "" ? undefined : input))
+        .refine(
+          (input): input is Hex | undefined => input === undefined || (isHex(input) && input.length === 66),
+          "ASCENSION_RECORD_SIGNER_PRIVATE_KEY must be a 32-byte 0x-prefixed hex private key",
+        ),
+      ASCENSION_RECORD_ATTESTATION_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+      ASCENSION_RECORD_MAX_LAG_BLOCKS: z.coerce.bigint().nonnegative().default(0n),
+      ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+      ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
+      ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(6),
     }),
   ),
 );
+
+if (env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY && !env.RPC_HTTP_URL) {
+  logger.error("RPC_HTTP_URL is required when ASCENSION_RECORD_SIGNER_PRIVATE_KEY is set");
+  process.exit(1);
+}
+
+if (env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY && !isAddress(env.STORE_ADDRESS)) {
+  logger.error("STORE_ADDRESS must be an address when ascension record signing is enabled");
+  process.exit(1);
+}
+
+const ascensionAttestation = env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY
+  ? {
+      signer: privateKeyToAccount(env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY),
+      publicClient: createPublicClient({ transport: http(env.RPC_HTTP_URL) }),
+      worldAddress: env.STORE_ADDRESS as Address,
+      ttlSeconds: env.ASCENSION_RECORD_ATTESTATION_TTL_SECONDS,
+      maxLagBlocks: env.ASCENSION_RECORD_MAX_LAG_BLOCKS,
+      rateLimitWindowMs: env.ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS * 1000,
+      rateLimitMaxRequests: env.ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS,
+      claimantRateLimitMaxRequests: env.ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS,
+    }
+  : undefined;
 
 const database = postgres(env.DATABASE_URL, {
   prepare: false,
@@ -75,7 +115,7 @@ server.use(
   }),
 );
 server.use(helloWorld());
-server.use(apiRoutes(database, leaderboardCache));
+server.use(apiRoutes(database, leaderboardCache, ascensionAttestation));
 
 server.use(
   createKoaMiddleware({

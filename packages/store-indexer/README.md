@@ -48,15 +48,18 @@ Note that you only need one of `RPC_HTTP_URL` or `RPC_WS_URL`, but we recommend 
 
 ### Prologue postgres frontend ascension attestation variables
 
-| Variable                                   | Description                                                                                                | Default |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------- |
-| `STORE_ADDRESS`                            | World/Store address; used as the EIP-712 verifying contract                                                |         |
-| `ASCENSION_RECORD_SIGNER_PRIVATE_KEY`      | Optional 32-byte private key for `/api/taruchi/:id/ascension-record-attestation?claimant=0x...` signatures |         |
-| `RPC_HTTP_URL`                             | Required when signing is enabled; used to compare indexed block with RPC head                              |         |
-| `ASCENSION_RECORD_ATTESTATION_TTL_SECONDS` | Unix-time validity window for each signed record                                                           | `120`   |
-| `ASCENSION_RECORD_MAX_LAG_BLOCKS`          | Maximum allowed lag between indexed block and RPC head before refusing to sign                             | `0`     |
+| Variable                                            | Description                                                                                                | Default |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------- |
+| `STORE_ADDRESS`                                     | World/Store address; used as the EIP-712 verifying contract                                                |         |
+| `ASCENSION_RECORD_SIGNER_PRIVATE_KEY`               | Optional 32-byte private key for `/api/taruchi/:id/ascension-record-attestation?claimant=0x...` signatures |         |
+| `RPC_HTTP_URL`                                      | Required when signing is enabled; used to compare indexed block with RPC head                              |         |
+| `ASCENSION_RECORD_ATTESTATION_TTL_SECONDS`          | Unix-time validity window for each signed record                                                           | `600`   |
+| `ASCENSION_RECORD_MAX_LAG_BLOCKS`                   | Maximum allowed lag between indexed block and RPC head before refusing to sign                             | `0`     |
+| `ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS`        | Sliding window for ascension attestation route rate limits                                                 | `60`    |
+| `ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS`          | Maximum attestation requests per requester per window                                                      | `30`    |
+| `ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS` | Maximum attestation requests per claimant per window                                                       | `6`     |
 
-The signer public address must match the game2 contracts `ASCENSION_RECORD_SIGNER_ADDRESS`. It only signs off-chain vouchers and does not pay claim gas.
+The signer public address must match the game2 contracts `ASCENSION_RECORD_SIGNER_ADDRESS`. It only signs off-chain vouchers and does not pay claim gas. `ASCENSION_RECORD_MAX_LAG_BLOCKS=0` is intentionally fail-closed for exact W/L freshness; raising it is an availability tradeoff during RPC propagation drift.
 
 ### Postgres indexer environment variables
 

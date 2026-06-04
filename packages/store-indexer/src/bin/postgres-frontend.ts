@@ -47,8 +47,11 @@ const env = parseEnv(
           (input): input is Hex | undefined => input === undefined || (isHex(input) && input.length === 66),
           "ASCENSION_RECORD_SIGNER_PRIVATE_KEY must be a 32-byte 0x-prefixed hex private key",
         ),
-      ASCENSION_RECORD_ATTESTATION_TTL_SECONDS: z.coerce.number().int().positive().default(120),
+      ASCENSION_RECORD_ATTESTATION_TTL_SECONDS: z.coerce.number().int().positive().default(600),
       ASCENSION_RECORD_MAX_LAG_BLOCKS: z.coerce.bigint().nonnegative().default(0n),
+      ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+      ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
+      ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(6),
     }),
   ),
 );
@@ -70,6 +73,9 @@ const ascensionAttestation = env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY
       worldAddress: env.STORE_ADDRESS as Address,
       ttlSeconds: env.ASCENSION_RECORD_ATTESTATION_TTL_SECONDS,
       maxLagBlocks: env.ASCENSION_RECORD_MAX_LAG_BLOCKS,
+      rateLimitWindowMs: env.ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS * 1000,
+      rateLimitMaxRequests: env.ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS,
+      claimantRateLimitMaxRequests: env.ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS,
     }
   : undefined;
 

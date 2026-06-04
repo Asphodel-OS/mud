@@ -31,12 +31,27 @@ type AscensionRecordAttestationOptions = {
   worldAddress: Address;
   ttlSeconds: number;
   maxLagBlocks: bigint;
+  rateLimitWindowMs: number;
+  rateLimitMaxRequests: number;
+  claimantRateLimitMaxRequests: number;
 };
 
 type IndexerStateRow = {
   chainId: string;
   indexedBlock: string;
 };
+
+type AscensionPrecheckRow = {
+  owner: string;
+  state: number;
+};
+
+type RateLimitBucket = {
+  count: number;
+  resetAt: number;
+};
+
+const TARUCHI_STATE_ASCENDED = 4;
 
 // bigint-safe JSON: ids serialize to strings. The cache's byWallet/byTaruchi
 // Maps are never passed in here (we send plain arrays only).
@@ -59,12 +74,60 @@ async function getIndexerState(database: Sql): Promise<{ chainId: bigint; indexe
   return { chainId: BigInt(rows[0].chainId), indexedBlock: BigInt(rows[0].indexedBlock) };
 }
 
+async function precheckAscensionClaimant(
+  database: Sql,
+  worldAddress: Address,
+  taruchiId: bigint,
+): Promise<{ status: "ok"; owner: Address; state: number } | { status: "missing" }> {
+  const schema = worldAddress.toLowerCase();
+  const rows = await database<AscensionPrecheckRow[]>`
+    SELECT '0x' || encode(c.owner, 'hex') AS owner, s.state::int AS state
+    FROM ${database(`${schema}.app__taruchi_core`)} c
+    JOIN ${database(`${schema}.app__taruchi_status`)} s ON s.id = c.id
+    WHERE c.id = ${taruchiId.toString()}
+    LIMIT 1
+  `;
+  if (rows.length === 0) return { status: "missing" };
+  return { status: "ok", owner: rows[0].owner as Address, state: Number(rows[0].state) };
+}
+
+function checkRateLimit(
+  buckets: Map<string, RateLimitBucket>,
+  key: string,
+  now: number,
+  windowMs: number,
+  maxRequests: number,
+): { limited: false } | { limited: true; retryAfterSeconds: number } {
+  if (buckets.size > 10_000) {
+    for (const [bucketKey, bucket] of buckets) {
+      if (bucket.resetAt <= now) buckets.delete(bucketKey);
+    }
+  }
+  const existing = buckets.get(key);
+  if (!existing || existing.resetAt <= now) {
+    buckets.set(key, { count: 1, resetAt: now + windowMs });
+    return { limited: false };
+  }
+  if (existing.count >= maxRequests) {
+    return { limited: true, retryAfterSeconds: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)) };
+  }
+  existing.count += 1;
+  return { limited: false };
+}
+
+function requestIdentity(ctx: Parameters<Middleware>[0]): string {
+  const forwardedFor = ctx.get("x-forwarded-for").split(",")[0]?.trim();
+  return forwardedFor || ctx.ip || ctx.request.ip || "unknown";
+}
+
 export function apiRoutes(
   database: Sql,
   leaderboardCache: LeaderboardCache,
   ascensionAttestation?: AscensionRecordAttestationOptions,
 ): Middleware {
   const router = new Router();
+  const requestBuckets = new Map<string, RateLimitBucket>();
+  const claimantBuckets = new Map<string, RateLimitBucket>();
 
   // Server-side aggregated leaderboard (trainers + per-taruchi + ascended).
   // 503 until the first cache build succeeds — never serve an empty board as valid.
@@ -146,6 +209,55 @@ export function apiRoutes(
       return;
     }
 
+    const now = Date.now();
+    const requesterLimit = checkRateLimit(
+      requestBuckets,
+      requestIdentity(ctx),
+      now,
+      ascensionAttestation.rateLimitWindowMs,
+      ascensionAttestation.rateLimitMaxRequests,
+    );
+    if (requesterLimit.limited) {
+      ctx.set("Retry-After", requesterLimit.retryAfterSeconds.toString());
+      jsonResponse(ctx, 429, { error: "too many ascension attestation requests" });
+      return;
+    }
+    const claimantLimit = checkRateLimit(
+      claimantBuckets,
+      claimant.toLowerCase(),
+      now,
+      ascensionAttestation.rateLimitWindowMs,
+      ascensionAttestation.claimantRateLimitMaxRequests,
+    );
+    if (claimantLimit.limited) {
+      ctx.set("Retry-After", claimantLimit.retryAfterSeconds.toString());
+      jsonResponse(ctx, 429, { error: "too many ascension attestation requests for claimant" });
+      return;
+    }
+
+    try {
+      const precheck = await precheckAscensionClaimant(database, ascensionAttestation.worldAddress, taruchiId);
+      if (precheck.status === "missing" || precheck.state !== TARUCHI_STATE_ASCENDED) {
+        jsonResponse(ctx, 404, { error: "taruchi is not ascended in indexed state" });
+        return;
+      }
+      if (precheck.owner.toLowerCase() !== claimant.toLowerCase()) {
+        jsonResponse(ctx, 403, {
+          error: "claimant is not the indexed taruchi owner",
+          owner: precheck.owner.toLowerCase(),
+          claimant,
+        });
+        return;
+      }
+    } catch (e) {
+      log.error("ascension attestation precheck failed", {
+        taruchiId: taruchiId.toString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
+      jsonResponse(ctx, 503, { error: "indexer ascension precheck failed" });
+      return;
+    }
+
     try {
       await leaderboardCache.rebuildNow();
     } catch (e) {
@@ -161,6 +273,7 @@ export function apiRoutes(
       jsonResponse(ctx, 503, { error: "leaderboard cache warming up" });
       return;
     }
+    const aggregateIndexedBlock = leaderboardCache.indexedBlock();
 
     let chainId: bigint;
     let indexedBlock: bigint;
@@ -176,6 +289,15 @@ export function apiRoutes(
         error: e instanceof Error ? e.message : String(e),
       });
       jsonResponse(ctx, 503, { error: "indexer freshness check failed" });
+      return;
+    }
+
+    if (aggregateIndexedBlock === null || aggregateIndexedBlock !== indexedBlock) {
+      jsonResponse(ctx, 409, {
+        error: "leaderboard aggregate changed during ascension attestation; retry",
+        aggregateIndexedBlock,
+        indexedBlock,
+      });
       return;
     }
 
@@ -242,17 +364,28 @@ export function apiRoutes(
     }
 
     try {
+      const postSignState = await getIndexerState(database);
       const postSignHeadBlock = await ascensionAttestation.publicClient.getBlockNumber();
-      const postSignLag = postSignHeadBlock > indexedBlock ? postSignHeadBlock - indexedBlock : 0n;
-      if (!isIndexerCaughtUp(indexedBlock, postSignHeadBlock, ascensionAttestation.maxLagBlocks)) {
+      const postSignLag =
+        postSignHeadBlock > postSignState.indexedBlock ? postSignHeadBlock - postSignState.indexedBlock : 0n;
+      if (!isIndexerCaughtUp(postSignState.indexedBlock, postSignHeadBlock, ascensionAttestation.maxLagBlocks)) {
         jsonResponse(ctx, 409, {
           error: `indexer lagging behind RPC head by ${postSignLag.toString()} block(s)`,
-          indexedBlock,
+          indexedBlock: postSignState.indexedBlock,
           headBlock: postSignHeadBlock,
           maxLagBlocks: ascensionAttestation.maxLagBlocks,
         });
         return;
       }
+      if (leaderboardCache.indexedBlock() !== postSignState.indexedBlock) {
+        jsonResponse(ctx, 409, {
+          error: "leaderboard aggregate changed during ascension attestation; retry",
+          aggregateIndexedBlock: leaderboardCache.indexedBlock(),
+          indexedBlock: postSignState.indexedBlock,
+        });
+        return;
+      }
+      indexedBlock = postSignState.indexedBlock;
       headBlock = postSignHeadBlock;
     } catch (e) {
       log.error("ascension attestation post-sign freshness check failed", {

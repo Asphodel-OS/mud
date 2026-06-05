@@ -23,8 +23,9 @@ const IDLE_STATE = 1;
 //   offset 0: affinity  (uint8,  1 byte)
 //   offset 1: state     (uint8,  1 byte)
 //   offset 2: level     (uint32, 4 bytes)
-//   offset 6: tp        (uint32, 4 bytes)
-//   offset 10: traits   (uint40, 5 bytes)
+//   offset 6: xp        (uint32, 4 bytes)
+//   offset 10: tp       (uint32, 4 bytes)
+//   offset 14: traits   (uint40, 5 bytes)
 
 export function unpackTraits(traits: bigint): string {
   const body = (traits >> 8n) & 0xffn;
@@ -47,7 +48,7 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
     const state = hexToNumber(sliceHex(staticData, 1, 2));
     if (state !== IDLE_STATE) continue;
 
-    const traits = hexToBigInt(sliceHex(staticData, 10, 15));
+    const traits = hexToBigInt(sliceHex(staticData, 14, 19));
     codes.push(unpackTraits(traits));
   }
 

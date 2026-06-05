@@ -45,7 +45,7 @@ describe("extractRevealCodes", () => {
     }) as unknown as StorageAdapterLog;
 
   it("extracts code from a reveal log (state=IDLE)", () => {
-    // TaruchiStatus static layout: affinity(1) + state(1) + level(4) + tp(4) + traits(5) = 15 bytes
+    // TaruchiStatus static layout: affinity(1) + state(1) + level(4) + xp(4) + tp(4) + traits(5) = 19 bytes
     // traits packed as uint40: flower | body<<8 | eye<<16 | mouth<<24 | equipment<<32
     // body=1,eye=3,mouth=5,equip=2,flower=1 -> big-endian uint40 = 0x0205030101
     const staticData =
@@ -53,6 +53,7 @@ describe("extractRevealCodes", () => {
       "03" + // affinity: 3
       "01" + // state: 1 (IDLE)
       "00000001" + // level: 1
+      "00000000" + // xp: 0
       "00000000" + // trainingPoints: 0
       "0205030101"; // traits: body=1,eye=3,mouth=5,equip=2,flower=1
 
@@ -62,29 +63,29 @@ describe("extractRevealCodes", () => {
   });
 
   it("ignores non-SetRecord events", () => {
-    const staticData = "0x" + "03" + "01" + "00000001" + "00000000" + "0205030101";
+    const staticData = "0x" + "03" + "01" + "00000001" + "00000000" + "00000000" + "0205030101";
     const logs = [makeLog("Store_DeleteRecord", TARUCHI_STATUS_TABLE_ID, staticData)];
     expect(extractRevealCodes(logs)).toEqual([]);
   });
 
   it("ignores wrong table ID", () => {
     const otherTableId = resourceToHex({ type: "table", namespace: "app", name: "TaruchiCore" });
-    const staticData = "0x" + "03" + "01" + "00000001" + "00000000" + "0205030101";
+    const staticData = "0x" + "03" + "01" + "00000001" + "00000000" + "00000000" + "0205030101";
     const logs = [makeLog("Store_SetRecord", otherTableId, staticData)];
     expect(extractRevealCodes(logs)).toEqual([]);
   });
 
   it("ignores non-IDLE state", () => {
     // state=2 (ENROLLED)
-    const staticData = "0x" + "03" + "02" + "00000001" + "00000000" + "0205030101";
+    const staticData = "0x" + "03" + "02" + "00000001" + "00000000" + "00000000" + "0205030101";
     const logs = [makeLog("Store_SetRecord", TARUCHI_STATUS_TABLE_ID, staticData)];
     expect(extractRevealCodes(logs)).toEqual([]);
   });
 
   it("extracts multiple reveals from one block", () => {
-    const staticData1 = "0x" + "03" + "01" + "00000001" + "00000000" + "0205030101";
+    const staticData1 = "0x" + "03" + "01" + "00000001" + "00000000" + "00000000" + "0205030101";
     // body=12,eye=5,mouth=3,equip=0,flower=0 -> uint40 = 0x0003050c00
-    const staticData2 = "0x" + "05" + "01" + "00000001" + "00000000" + "0003050c00";
+    const staticData2 = "0x" + "05" + "01" + "00000001" + "00000000" + "00000000" + "0003050c00";
     const logs = [
       makeLog("Store_SetRecord", TARUCHI_STATUS_TABLE_ID, staticData1),
       makeLog("Store_SetRecord", TARUCHI_STATUS_TABLE_ID, staticData2),

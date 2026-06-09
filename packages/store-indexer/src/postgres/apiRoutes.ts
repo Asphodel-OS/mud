@@ -193,6 +193,29 @@ export function apiRoutes(
     });
   });
 
+  // One taruchi's full detail by onchain uint256 id, not visible roster index.
+  // Fighter Card payload: onchain status + unpacked
+  // combat stats/traits + lifetime record + per-tier W/L + ascension flag.
+  // Served from the same per-block aggregate cache as the leaderboard, so it's
+  // an O(1) in-memory lookup with no per-request DB query.
+  router.get("/api/taruchi/:id", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      jsonResponse(ctx, 503, { error: "leaderboard cache warming up" });
+      return;
+    }
+    const taruchiId = parseTaruchiIdParam(String(ctx.params.id ?? ""));
+    if (taruchiId === null) {
+      jsonResponse(ctx, 400, { error: "invalid taruchi id" });
+      return;
+    }
+    const detail = leaderboardCache.getTaruchi(taruchiId.toString());
+    if (!detail) {
+      jsonResponse(ctx, 404, { error: "taruchi not found" });
+      return;
+    }
+    jsonResponse(ctx, 200, { ...detail, computedAt: leaderboardCache.computedAt() });
+  });
+
   // Fresh signed W/L record for ascension NFT claims. This uses the same
   // aggregate as Rankings/TFC (duels + Festival sub-battles), binds the
   // signature to the current indexed owner, forces an immediate rebuild, and

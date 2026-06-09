@@ -3,6 +3,7 @@ import { Observable, Subscription } from "rxjs";
 import { hexToString, type Hex } from "viem";
 import { transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { buildAggregate } from "../leaderboard/buildAggregate";
+import { buildTaruchiDetails, type TaruchiDetail, type TaruchiStatusRow } from "../leaderboard/buildTaruchiDetails";
 import { unpackU32 } from "../leaderboard/packUtils";
 import { positionToPlacement } from "../leaderboard/tourneyMath";
 import {
@@ -98,6 +99,8 @@ export interface LeaderboardCache {
   getRoster(wallet: string): TrainerRosterEntry[];
   /** The wallet's finished matches (newest first) for the Mine archive. */
   getBattles(wallet: string): MatchSummary[];
+  /** Full Fighter-Card detail for one taruchi by onchain uint256 id, or null if unknown. */
+  getTaruchi(id: string): TaruchiDetail | null;
   computedAt(): number;
   /** MUD config block used by the current aggregate; null until first successful build. */
   indexedBlock(): bigint | null;
@@ -112,6 +115,7 @@ type CacheState = {
   aggregate: LeaderboardAggregate;
   rosterByOwner: Map<string, TrainerRosterEntry[]>;
   matchesByOwner: Map<string, MatchSummary[]>;
+  detailById: Map<string, TaruchiDetail>;
   computedAt: number;
   indexedBlock: bigint | null;
 };
@@ -120,6 +124,7 @@ const EMPTY_STATE: CacheState = {
   aggregate: EMPTY_AGGREGATE,
   rosterByOwner: new Map(),
   matchesByOwner: new Map(),
+  detailById: new Map(),
   computedAt: 0,
   indexedBlock: null,
 };
@@ -158,7 +163,12 @@ export function createLeaderboardCache(
       sql`SELECT id::text AS id, player_a_index::int AS a, player_b_index::int AS b, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__duel`)}`,
       sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
       sql`SELECT id::text AS id, "index"::int AS index, '0x' || encode(owner, 'hex') AS owner FROM ${sql(`${schema}.app__taruchi_core`)}`,
-      sql`SELECT id::text AS id, affinity::int AS affinity, state::int AS state, level::int AS level, traits::text AS traits FROM ${sql(`${schema}.app__taruchi_status`)}`,
+      sql`
+        SELECT id::text AS id, affinity::int AS affinity, state::int AS state, level::int AS level,
+          xp::int AS xp, training_points::int AS "trainingPoints", bud_index::int AS "budIndex",
+          traits::text AS traits, stats::text AS stats
+        FROM ${sql(`${schema}.app__taruchi_status`)}
+      `,
       sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
     ]);
 
@@ -181,12 +191,16 @@ export function createLeaderboardCache(
       time: Number(r.time),
     }));
     const cores = coreRows.map((r) => ({ id: BigInt(r.id), owner: r.owner as string, index: Number(r.index) }));
-    const statuses = statusRows.map((r) => ({
+    const statuses: TaruchiStatusRow[] = statusRows.map((r) => ({
       id: BigInt(r.id),
       state: Number(r.state),
       level: Number(r.level),
+      xp: Number(r.xp),
+      trainingPoints: Number(r.trainingPoints),
       affinity: Number(r.affinity),
+      budIndex: Number(r.budIndex),
       traits: BigInt(r.traits),
+      stats: BigInt(r.stats),
     }));
     const names = nameRows.map((r) => ({ id: BigInt(r.id), name: r.name as string }));
 
@@ -289,10 +303,26 @@ export function createLeaderboardCache(
     }
     for (const list of matchesByOwner.values()) list.sort((a, b) => b.time - a.time);
 
+    // Per-taruchi detail (Fighter Card payload): onchain status + unpacked
+    // stats/traits + lifetime record (reused from the aggregate) + per-tier
+    // W/L. Same inputs as above; O(tarus + matches), served by /api/taruchi/:id.
+    const detailById = buildTaruchiDetails({
+      tourneys,
+      duels,
+      results,
+      cores,
+      statuses,
+      names,
+      byTaruchi: aggregate.byTaruchi,
+      spriteFor: (_core, status) => traitsImageUrl(status?.traits, opts.cdnBase),
+      decodeName: decodeBytes32Name,
+    });
+
     return {
       aggregate,
       rosterByOwner,
       matchesByOwner,
+      detailById,
       computedAt: Date.now(),
       indexedBlock: configRows[0]?.indexedBlock ? BigInt(configRows[0].indexedBlock) : null,
     };
@@ -378,6 +408,7 @@ export function createLeaderboardCache(
     getStats: (wallet) => state.aggregate.byWallet.get(wallet.toLowerCase()) ?? null,
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
     getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
+    getTaruchi: (id) => state.detailById.get(id) ?? null,
     computedAt: () => state.computedAt,
     indexedBlock: () => state.indexedBlock,
     rebuildNow,

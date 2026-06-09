@@ -408,7 +408,7 @@ export function createLeaderboardCache(
     getStats: (wallet) => state.aggregate.byWallet.get(wallet.toLowerCase()) ?? null,
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
     getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
-    getTaruchi: (id) => state.detailById.get(String(id)) ?? null,
+    getTaruchi: (id) => state.detailById.get(id) ?? null,
     computedAt: () => state.computedAt,
     indexedBlock: () => state.indexedBlock,
     rebuildNow,

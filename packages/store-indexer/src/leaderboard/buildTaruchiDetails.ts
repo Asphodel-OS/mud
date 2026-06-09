@@ -119,6 +119,7 @@ export interface BuildTaruchiDetailsInput {
   decodeName: (name: string) => string;
 }
 
+const TARUCHI_STATE_UNREVEALED = 0;
 const TARUCHI_STATE_ASCENDED = 4;
 const NEVER_PLACED = 8;
 const MASK_16 = 0xffffn;
@@ -177,8 +178,14 @@ export function buildTaruchiDetails(input: BuildTaruchiDetailsInput): Map<string
   const { tourneys, duels, results, cores, statuses, names, byTaruchi, spriteFor, decodeName } = input;
 
   const statusById = new Map(statuses.map((s) => [String(s.id), s]));
+  const coreByIndex = new Map(cores.map((c) => [c.index, c]));
   const nameById = new Map(names.map((n) => [String(n.id), n.name]));
   const resultById = new Map(results.map((r) => [String(r.id), r.placements]));
+  const shouldAccumulateIndex = (idx: number): boolean => {
+    const core = coreByIndex.get(idx);
+    if (!core) return false;
+    return statusById.get(String(core.id))?.state !== TARUCHI_STATE_UNREVEALED;
+  };
 
   // Per-tier W/L, keyed by taruchi index, using the SAME placement → won/lost
   // math as buildAggregate so the tiers sum to the overall record.
@@ -206,6 +213,7 @@ export function buildTaruchiDetails(input: BuildTaruchiDetailsInput): Map<string
     for (const idx of players) {
       if (seen.has(idx)) continue;
       seen.add(idx);
+      if (!shouldAccumulateIndex(idx)) continue;
       const pos = posByIdx.get(idx);
       if (pos === undefined) continue;
       const placement = positionToPlacement(pos, placements.length);
@@ -227,6 +235,7 @@ export function buildTaruchiDetails(input: BuildTaruchiDetailsInput): Map<string
     const p0 = placements[0];
     const p1 = placements[1];
     for (const idx of [d.playerAIndex, d.playerBIndex]) {
+      if (!shouldAccumulateIndex(idx)) continue;
       const pos = p0 === idx ? 0 : p1 === idx ? 1 : -1;
       if (pos === -1) continue;
       const placement = positionToPlacement(pos, placements.length);

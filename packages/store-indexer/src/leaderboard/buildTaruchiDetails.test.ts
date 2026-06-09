@@ -10,7 +10,6 @@ import {
   type TaruchiStatusRow,
 } from "./buildTaruchiDetails";
 
-const MASK_16 = 0xffffn;
 const i16 = (n: number): bigint => BigInt(n & 0xffff);
 const packStats = (health: number, power: number, harmony: number, violence: number): bigint =>
   i16(health) | (i16(power) << 16n) | (i16(harmony) << 32n) | (i16(violence) << 48n);
@@ -197,11 +196,6 @@ describe("buildTaruchiDetails", () => {
     expect(d.ascended).toBe(false);
   });
 
-  // Guard the int16 mask constant the helpers rely on.
-  it("uses a 16-bit mask", () => {
-    expect(MASK_16).toBe(0xffffn);
-  });
-
   it("splits eight-player festival results into the collapsed tier bucket", () => {
     const festivalCores = Array.from({ length: 8 }, (_, i) => ({
       id: BigInt(1000 + i),
@@ -233,6 +227,37 @@ describe("buildTaruchiDetails", () => {
     });
     expect(festivalDetails.get("1007")!.bracketRecord).toEqual({
       rookie: { wins: 2, losses: 1 },
+      veteran: { wins: 0, losses: 0 },
+      champion: { wins: 0, losses: 0 },
+    });
+  });
+
+  it("does not accumulate bracket records for unrevealed tarus", () => {
+    const unrevealedCore = { id: 400n, owner: "0xDDD", index: 4 };
+    const out = buildTaruchiDetails({
+      tourneys: [],
+      duels: [{ id: 123n, status: 2, bracket: 1, playerAIndex: 4, playerBIndex: 99 }],
+      results: [{ id: 123n, placements: packU32([4, 99]) }],
+      cores: [unrevealedCore],
+      statuses: [status({ id: 400n, state: 0 })],
+      names: [],
+      byTaruchi: new Map(),
+      spriteFor: (core) => `sprite/${core.index}`,
+      decodeName: (s) => s,
+    });
+
+    expect(out.get("400")!.record).toEqual({
+      wins: 0,
+      losses: 0,
+      tournaments: 0,
+      bestPlacement: 8,
+      winrate: 0,
+      qualified: false,
+      onyxWon: 0,
+      onyxSpent: 0,
+    });
+    expect(out.get("400")!.bracketRecord).toEqual({
+      rookie: { wins: 0, losses: 0 },
       veteran: { wins: 0, losses: 0 },
       champion: { wins: 0, losses: 0 },
     });

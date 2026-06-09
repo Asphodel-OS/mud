@@ -99,7 +99,7 @@ export interface LeaderboardCache {
   getRoster(wallet: string): TrainerRosterEntry[];
   /** The wallet's finished matches (newest first) for the Mine archive. */
   getBattles(wallet: string): MatchSummary[];
-  /** Full Fighter-Card detail for one taruchi (string id), or null if unknown. */
+  /** Full Fighter-Card detail for one taruchi by onchain uint256 id, or null if unknown. */
   getTaruchi(id: string): TaruchiDetail | null;
   computedAt(): number;
   /** MUD config block used by the current aggregate; null until first successful build. */

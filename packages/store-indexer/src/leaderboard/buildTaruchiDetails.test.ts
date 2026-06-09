@@ -201,4 +201,40 @@ describe("buildTaruchiDetails", () => {
   it("uses a 16-bit mask", () => {
     expect(MASK_16).toBe(0xffffn);
   });
+
+  it("splits eight-player festival results into the collapsed tier bucket", () => {
+    const festivalCores = Array.from({ length: 8 }, (_, i) => ({
+      id: BigInt(1000 + i),
+      owner: `0x${String(i + 1).padStart(40, "0")}`,
+      index: i + 1,
+    }));
+    const festivalStatuses = festivalCores.map((core) => status({ id: core.id }));
+    const festivalInput: BuildTaruchiDetailsInput = {
+      tourneys: [{ id: 77n, status: 2, bracket: 4, players: packU32([1, 2, 3, 4, 5, 6, 7, 8]) }],
+      duels: [],
+      results: [{ id: 77n, placements: packU32([1, 2, 3, 4, 5, 6, 7, 8]) }],
+      cores: festivalCores,
+      statuses: festivalStatuses,
+      names: [],
+      byTaruchi: new Map([
+        ["1000", lbRow({ taruchiId: 1000n, taruchiIndex: 1, ownerWallet: festivalCores[0].owner, wins: 3, losses: 0 })],
+        ["1007", lbRow({ taruchiId: 1007n, taruchiIndex: 8, ownerWallet: festivalCores[7].owner, wins: 2, losses: 1 })],
+      ]),
+      spriteFor: (core) => `sprite/${core.index}`,
+      decodeName: (s) => s,
+    };
+
+    const festivalDetails = buildTaruchiDetails(festivalInput);
+
+    expect(festivalDetails.get("1000")!.bracketRecord).toEqual({
+      rookie: { wins: 3, losses: 0 },
+      veteran: { wins: 0, losses: 0 },
+      champion: { wins: 0, losses: 0 },
+    });
+    expect(festivalDetails.get("1007")!.bracketRecord).toEqual({
+      rookie: { wins: 2, losses: 1 },
+      veteran: { wins: 0, losses: 0 },
+      champion: { wins: 0, losses: 0 },
+    });
+  });
 });

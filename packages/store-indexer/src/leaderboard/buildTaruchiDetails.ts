@@ -1,6 +1,7 @@
 /**
  * Per-taruchi detail builder — the data behind a single Taru's Fighter Card,
- * served by `GET /api/taruchi/:id`.
+ * served by `GET /api/taruchi/:id`, where `:id` is the onchain uint256
+ * Taruchi id (not the visible Taruchi index).
  *
  * Combines, for every owned taruchi (incl. never-played):
  *   - onchain status: level, xp, training points, affinity, state, bud index

@@ -193,7 +193,8 @@ export function apiRoutes(
     });
   });
 
-  // One taruchi's full detail (Fighter Card payload): onchain status + unpacked
+  // One taruchi's full detail by onchain uint256 id, not visible roster index.
+  // Fighter Card payload: onchain status + unpacked
   // combat stats/traits + lifetime record + per-tier W/L + ascension flag.
   // Served from the same per-block aggregate cache as the leaderboard, so it's
   // an O(1) in-memory lookup with no per-request DB query.

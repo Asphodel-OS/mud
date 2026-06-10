@@ -18,9 +18,11 @@ import {
   isIndexerCaughtUp,
   lookupAscensionRecord,
   parseClaimantParam,
+  parseRecipientParam,
   parseTaruchiIdParam,
   signAscensionRecord,
 } from "./ascensionRecordAttestation";
+import type { RecipientVerifier } from "./privyRecipientVerifier";
 
 const log = logger.child({ component: "api-logs" });
 const mudSchemaName = transformSchemaName("mud");
@@ -34,6 +36,7 @@ type AscensionRecordAttestationOptions = {
   rateLimitWindowMs: number;
   rateLimitMaxRequests: number;
   claimantRateLimitMaxRequests: number;
+  recipientVerifier?: RecipientVerifier;
 };
 
 type IndexerStateRow = {
@@ -236,6 +239,12 @@ export function apiRoutes(
       jsonResponse(ctx, 400, { error: "invalid claimant address" });
       return;
     }
+    const rawRecipient = typeof ctx.query.recipient === "string" ? ctx.query.recipient : undefined;
+    const recipient = rawRecipient === undefined ? claimant : parseRecipientParam(rawRecipient);
+    if (recipient === null) {
+      jsonResponse(ctx, 400, { error: "invalid recipient address" });
+      return;
+    }
 
     const now = Date.now();
     const requesterLimit = checkRateLimit(
@@ -346,7 +355,13 @@ export function apiRoutes(
       return;
     }
 
-    const lookup = lookupAscensionRecord(leaderboardCache.getAggregate(), taruchiId, chainIdNumber, claimant);
+    const lookup = lookupAscensionRecord(
+      leaderboardCache.getAggregate(),
+      taruchiId,
+      chainIdNumber,
+      claimant,
+      recipient,
+    );
     if (lookup.status === "not-ascended") {
       jsonResponse(ctx, 404, { error: "taruchi is not ascended in indexed state" });
       return;
@@ -370,6 +385,37 @@ export function apiRoutes(
         losses: lookup.losses,
       });
       return;
+    }
+
+    if (recipient.toLowerCase() !== claimant.toLowerCase()) {
+      if (!ascensionAttestation.recipientVerifier) {
+        jsonResponse(ctx, 503, { error: "ascension recipient verification not configured" });
+        return;
+      }
+      try {
+        const verification = await ascensionAttestation.recipientVerifier.verifyLinkedWallets(claimant, recipient);
+        if (verification.status === "not-linked") {
+          jsonResponse(ctx, 403, { error: "recipient is not linked to the claimant Privy user" });
+          return;
+        }
+        if (verification.status === "unavailable") {
+          log.error("ascension recipient verification unavailable", {
+            claimant,
+            recipient,
+            error: verification.error,
+          });
+          jsonResponse(ctx, 503, { error: "ascension recipient verification unavailable" });
+          return;
+        }
+      } catch (e) {
+        log.error("ascension recipient verification failed", {
+          claimant,
+          recipient,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        jsonResponse(ctx, 503, { error: "ascension recipient verification failed" });
+        return;
+      }
     }
 
     const deadline = BigInt(Math.floor(Date.now() / 1000) + ascensionAttestation.ttlSeconds);
@@ -433,6 +479,7 @@ export function apiRoutes(
     jsonResponse(ctx, 200, {
       taruchiId: lookup.record.taruchiId,
       claimant: lookup.record.claimant,
+      recipient: lookup.record.recipient,
       wins: lookup.record.wins,
       losses: lookup.record.losses,
       deadline,

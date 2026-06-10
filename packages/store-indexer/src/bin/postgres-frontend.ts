@@ -19,6 +19,7 @@ import { metrics } from "../koa-middleware/metrics";
 import { logsLive } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
 import { createLeaderboardCache } from "../postgres/aggregateCache";
+import { createPrivyRecipientVerifier } from "../postgres/privyRecipientVerifier";
 import { logger } from "../logger";
 import packageJson from "../../package.json";
 
@@ -36,7 +37,7 @@ const env = parseEnv(
       // CDN base for taruchi sprite URLs in leaderboard responses. Env-driven so
       // the indexer isn't coupled to a hardcoded (test) CDN.
       TARUCHI_CDN_BASE: z.string().default("https://i.test.kamigotchi.io/taruchi"),
-      // Optional: enables /api/taruchi/:id/ascension-record-attestation?claimant=0x...
+      // Optional: enables /api/taruchi/:id/ascension-record-attestation?claimant=0x...&recipient=0x...
       // When set, RPC_HTTP_URL is required so the endpoint can refuse stale indexer state.
       RPC_HTTP_URL: z.string().optional(),
       ASCENSION_RECORD_SIGNER_PRIVATE_KEY: z
@@ -52,6 +53,14 @@ const env = parseEnv(
       ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
       ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
       ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(6),
+      PRIVY_APP_ID: z
+        .string()
+        .optional()
+        .transform((input) => (input === "" ? undefined : input)),
+      PRIVY_APP_SECRET: z
+        .string()
+        .optional()
+        .transform((input) => (input === "" ? undefined : input)),
     }),
   ),
 );
@@ -66,6 +75,11 @@ if (env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY && !isAddress(env.STORE_ADDRESS)) {
   process.exit(1);
 }
 
+if ((env.PRIVY_APP_ID && !env.PRIVY_APP_SECRET) || (!env.PRIVY_APP_ID && env.PRIVY_APP_SECRET)) {
+  logger.error("PRIVY_APP_ID and PRIVY_APP_SECRET must be configured together");
+  process.exit(1);
+}
+
 const ascensionAttestation = env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY
   ? {
       signer: privateKeyToAccount(env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY),
@@ -76,6 +90,10 @@ const ascensionAttestation = env.ASCENSION_RECORD_SIGNER_PRIVATE_KEY
       rateLimitWindowMs: env.ASCENSION_RECORD_RATE_LIMIT_WINDOW_SECONDS * 1000,
       rateLimitMaxRequests: env.ASCENSION_RECORD_RATE_LIMIT_MAX_REQUESTS,
       claimantRateLimitMaxRequests: env.ASCENSION_RECORD_CLAIMANT_RATE_LIMIT_MAX_REQUESTS,
+      recipientVerifier:
+        env.PRIVY_APP_ID && env.PRIVY_APP_SECRET
+          ? createPrivyRecipientVerifier({ appId: env.PRIVY_APP_ID, appSecret: env.PRIVY_APP_SECRET })
+          : undefined,
     }
   : undefined;
 

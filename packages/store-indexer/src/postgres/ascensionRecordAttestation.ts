@@ -6,6 +6,7 @@ export const ASCENSION_RECORD_TYPES = {
   AscensionRecord: [
     { name: "taruchiID", type: "uint256" },
     { name: "claimant", type: "address" },
+    { name: "recipient", type: "address" },
     { name: "wins", type: "uint32" },
     { name: "losses", type: "uint32" },
     { name: "deadline", type: "uint64" },
@@ -15,6 +16,7 @@ export const ASCENSION_RECORD_TYPES = {
 export type AscensionRecord = {
   taruchiId: bigint;
   claimant: Address;
+  recipient: Address;
   wins: number;
   losses: number;
 };
@@ -40,11 +42,17 @@ export function parseClaimantParam(raw: string | undefined): Address | null {
   return getAddress(raw);
 }
 
+export function parseRecipientParam(raw: string | undefined): Address | null {
+  if (!raw || !isAddress(raw)) return null;
+  return getAddress(raw);
+}
+
 export function lookupAscensionRecord(
   aggregate: LeaderboardAggregate,
   taruchiId: bigint,
   chainId: number,
   claimant: Address,
+  recipient: Address,
 ): AscensionRecordLookup {
   const taruchiKey = taruchiId.toString();
   const ascended = aggregate.ascended.find((row) => row.taruchiId === taruchiId);
@@ -59,7 +67,7 @@ export function lookupAscensionRecord(
   if (owner !== claimant.toLowerCase()) return { status: "claimant-mismatch", owner, claimant };
   if (!isUint32(wins) || !isUint32(losses)) return { status: "record-out-of-range", wins, losses };
 
-  return { status: "ok", record: { taruchiId, claimant, wins, losses } };
+  return { status: "ok", record: { taruchiId, claimant, recipient, wins, losses } };
 }
 
 export function buildAscensionRecordTypedData(args: {
@@ -67,6 +75,7 @@ export function buildAscensionRecordTypedData(args: {
   worldAddress: Address;
   taruchiId: bigint;
   claimant: Address;
+  recipient: Address;
   wins: number;
   losses: number;
   deadline: bigint;
@@ -82,6 +91,7 @@ export function buildAscensionRecordTypedData(args: {
   message: {
     taruchiID: bigint;
     claimant: Address;
+    recipient: Address;
     wins: number;
     losses: number;
     deadline: bigint;
@@ -99,6 +109,7 @@ export function buildAscensionRecordTypedData(args: {
     message: {
       taruchiID: args.taruchiId,
       claimant: args.claimant,
+      recipient: args.recipient,
       wins: args.wins,
       losses: args.losses,
       deadline: args.deadline,
@@ -119,6 +130,7 @@ export async function signAscensionRecord(args: {
       worldAddress: args.worldAddress,
       taruchiId: args.record.taruchiId,
       claimant: args.record.claimant,
+      recipient: args.record.recipient,
       wins: args.record.wins,
       losses: args.record.losses,
       deadline: args.deadline,

@@ -7,12 +7,14 @@ import {
   isIndexerCaughtUp,
   lookupAscensionRecord,
   parseClaimantParam,
+  parseRecipientParam,
   parseTaruchiIdParam,
   signAscensionRecord,
 } from "./ascensionRecordAttestation";
 
 const worldAddress = "0x000000000000000000000000000000000000beef" as Address;
 const claimant = getAddress("0x0000000000000000000000000000000000000abc");
+const recipient = getAddress("0x0000000000000000000000000000000000000aaa");
 const otherClaimant = getAddress("0x0000000000000000000000000000000000000def");
 const signer = privateKeyToAccount("0x000000000000000000000000000000000000000000000000000000000000a5ce");
 
@@ -70,6 +72,12 @@ describe("ascensionRecordAttestation", () => {
     expect(parseClaimantParam(undefined)).toBeNull();
   });
 
+  it("parses recipient addresses only", () => {
+    expect(parseRecipientParam(recipient.toLowerCase())).toBe(recipient);
+    expect(parseRecipientParam("0xabc")).toBeNull();
+    expect(parseRecipientParam(undefined)).toBeNull();
+  });
+
   it("checks indexed block freshness against RPC head", () => {
     expect(isIndexerCaughtUp(100n, 100n, 0n)).toBe(true);
     expect(isIndexerCaughtUp(99n, 100n, 0n)).toBe(false);
@@ -77,23 +85,27 @@ describe("ascensionRecordAttestation", () => {
   });
 
   it("returns the per-taruchi leaderboard record for ascended tarus", () => {
-    const lookup = lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, claimant);
-    expect(lookup).toEqual({ status: "ok", record: { taruchiId: 11n, claimant, wins: 7, losses: 2 } });
+    const lookup = lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, claimant, recipient);
+    expect(lookup).toEqual({ status: "ok", record: { taruchiId: 11n, claimant, recipient, wins: 7, losses: 2 } });
   });
 
   it("refuses to sign missing records on non-local chains", () => {
-    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 1, claimant)).toEqual({ status: "record-missing" });
+    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 1, claimant, recipient)).toEqual({
+      status: "record-missing",
+    });
   });
 
   it("allows a zero record for local dev ascensions", () => {
-    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 31337, claimant)).toEqual({
+    expect(lookupAscensionRecord(aggregateWithAscended(), 11n, 31337, claimant, recipient)).toEqual({
       status: "ok",
-      record: { taruchiId: 11n, claimant, wins: 0, losses: 0 },
+      record: { taruchiId: 11n, claimant, recipient, wins: 0, losses: 0 },
     });
   });
 
   it("refuses records for non-owner claimants", () => {
-    expect(lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, otherClaimant)).toEqual({
+    expect(
+      lookupAscensionRecord(aggregateWithAscended({ wins: 7, losses: 2 }), 11n, 1, otherClaimant, recipient),
+    ).toEqual({
       status: "claimant-mismatch",
       owner: claimant.toLowerCase(),
       claimant: otherClaimant,
@@ -101,7 +113,7 @@ describe("ascensionRecordAttestation", () => {
   });
 
   it("signs typed data recoverable to the configured signer", async () => {
-    const record = { taruchiId: 11n, claimant, wins: 7, losses: 2 };
+    const record = { taruchiId: 11n, claimant, recipient, wins: 7, losses: 2 };
     const deadline = 1_800_000_000n;
     const signature = await signAscensionRecord({
       signer,
@@ -116,6 +128,7 @@ describe("ascensionRecordAttestation", () => {
         worldAddress,
         taruchiId: record.taruchiId,
         claimant: record.claimant,
+        recipient: record.recipient,
         wins: record.wins,
         losses: record.losses,
         deadline,

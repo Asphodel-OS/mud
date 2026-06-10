@@ -19,22 +19,33 @@ const log = logger.child({ component: "notification-event" });
  * onchain thing RESOLVES (mint reveal, duel complete, festival complete). A
  * Supabase DB webhook on insert fans each row out via the send-push edge fn.
  *
- * Everything is captured straight from `block.logs` (same posture as the SQS
- * reveal hook + tourneyAnnouncementProjector) — never a DB read. The one wrinkle
- * the other projectors don't have: every onchain signal is a taruchi INDEX or a
- * taruchi ID, never a wallet, and the resolving table rows carry no owner. So we
- * maintain owner caches learned from TaruchiCore writes (which carry both id and
- * index → owner). See the architect note in docs/PUSH_NOTIFICATIONS_BUILD_PLAN.
+ * Captured straight from `block.logs` (same posture as the SQS reveal hook +
+ * tourneyAnnouncementProjector) — never a DB read. Two things shape the design:
  *
- * Training is intentionally NOT emitted: a TaruchiStatus→IDLE write is
- * indistinguishable mint-vs-training from the new state alone, so we only emit
- * `mint` on the specific UNREVEALED→IDLE transition (tracked via lastStateById).
+ *  1. Signals are taruchi INDICES or IDs, never wallets, and resolving rows
+ *     carry no owner — so we keep owner caches learned from TaruchiCore writes
+ *     (ownerById for mint, ownerByIndex for duel/festival players).
+ *
+ *  2. We only watch full `Store_SetRecord` events (setRecordsFor). That dictates
+ *     WHICH write we key off for each event — verified against the contracts:
+ *       - MINT: reveal does `TaruchiStatus.set(IDLE)` — the FIRST Status write
+ *         for that id (mint commit writes no Status row; UNREVEALED=0 is just the
+ *         unwritten default). So mint = first IDLE Status write (prev undefined).
+ *         Training/duel returns to IDLE are on an already-seen id (prev defined),
+ *         so they don't false-fire. Reroll gets a new id → first write → fires.
+ *       - DUEL + FESTIVAL: both resolve by writing `TourneyResult.set(...)` (a
+ *         full SetRecord). We do NOT watch Duel.status — `Duel.setStatus` emits a
+ *         Store_SpliceStaticData, which setRecordsFor (rightly) ignores. The
+ *         duel's player indices come from the Duel.set ENROLL SetRecord (cached);
+ *         the festival's entrants from the Tourney.set enroll SetRecord (cached).
+ *         At the TourneyResult write we branch: a known duel id → duel, else a
+ *         festival-bracket Tourney id → festival.
+ *
+ * Training delivery is deferred (the toggle ships, no send) — see the PRD.
  */
 
 // --- enums (codegen common.sol) ---
-const STATE_UNREVEALED = 0;
-const STATE_IDLE = 1;
-const TOURNEY_STATE_COMPLETED = 2;
+const STATE_IDLE = 1; // TaruchiState.IDLE
 const FESTIVAL_BRACKETS = new Set([4, 5, 6]); // ROOKIE/VETERAN/CHAMPION_FESTIVAL
 
 // --- table ids ---
@@ -44,17 +55,16 @@ const DUEL_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Du
 const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Tourney" });
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
 
-// --- static field offsets (from the codegen valueSchemas) ---
-// TaruchiCore  : owner address @0 (20), index u32 @20 (4)
+// --- static field offsets (verified against the codegen decodeStatic) ---
+// TaruchiCore : owner address @0 (20), index u32 @20 (4)
 const CORE_OWNER_OFFSET = 0;
 const CORE_INDEX_OFFSET = 20;
 // TaruchiStatus: affinity u8 @0, state u8 @1, ...
 const STATUS_STATE_OFFSET = 1;
-// Duel         : playerAIndex u32 @0, playerBIndex u32 @4, bracket u8 @8, status u8 @9
+// Duel : playerAIndex u32 @0, playerBIndex u32 @4, bracket u8 @8, status u8 @9
 const DUEL_A_OFFSET = 0;
 const DUEL_B_OFFSET = 4;
-const DUEL_STATUS_OFFSET = 9;
-// Tourney      : players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+// Tourney : players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
 const TOURNEY_PLAYERS_OFFSET = 0;
 const TOURNEY_BRACKET_OFFSET = 64;
 
@@ -75,13 +85,15 @@ export function unpackIndices(packed: bigint): number[] {
   return out;
 }
 
-/** Mutable cross-block caches. Owner maps are learned from TaruchiCore; state
- *  maps track prior values so we fire on transitions, not on every rewrite. */
+/** Mutable cross-block caches. Owner maps learned from TaruchiCore; enroll maps
+ *  from Duel/Tourney SetRecords; lastStateById marks ids we've already seen a
+ *  Status write for (so the first IDLE = mint reveal). Never pruned (a reorg may
+ *  replay only the resolve block; the enroll/mint precedes it). */
 export type NotifCaches = {
   ownerById: Map<string, string>;
   ownerByIndex: Map<number, string>;
   lastStateById: Map<string, number>;
-  lastDuelStatus: Map<string, number>;
+  duelPlayersById: Map<string, [number, number]>;
   playersById: Map<string, bigint>;
   bracketById: Map<string, number>;
 };
@@ -91,7 +103,7 @@ export function emptyCaches(): NotifCaches {
     ownerById: new Map(),
     ownerByIndex: new Map(),
     lastStateById: new Map(),
-    lastDuelStatus: new Map(),
+    duelPlayersById: new Map(),
     playersById: new Map(),
     bracketById: new Map(),
   };
@@ -113,8 +125,7 @@ export function extractNotifEvents(
   caches: NotifCaches,
   blockNumber: number,
 ): NotifEvent[] {
-  // 1) Learn owners FIRST (a mint's Core write may share this block with later
-  //    logic; enroll Core writes precede duel/festival resolves anyway).
+  // 1) Learn owners (TaruchiCore is written at mint/reroll, before any resolve).
   for (const rec of setRecordsFor(logs, TARUCHI_CORE_TABLE_ID)) {
     const id = keyToId(rec);
     const owner = readAddress(rec.staticData, CORE_OWNER_OFFSET);
@@ -122,7 +133,15 @@ export function extractNotifEvents(
     caches.ownerById.set(id, owner);
     if (index !== 0) caches.ownerByIndex.set(index, owner);
   }
-  // Learn tourney bracket + players (enroll precedes resolve; never pruned).
+  // Learn duel player indices from the enroll SetRecord (resolve is a splice we
+  // don't see — we trigger off the TourneyResult write instead).
+  for (const rec of setRecordsFor(logs, DUEL_TABLE_ID)) {
+    caches.duelPlayersById.set(keyToId(rec), [
+      readStaticUint(rec.staticData, DUEL_A_OFFSET, 4),
+      readStaticUint(rec.staticData, DUEL_B_OFFSET, 4),
+    ]);
+  }
+  // Learn festival bracket + entrants from the Tourney enroll SetRecord.
   for (const rec of setRecordsFor(logs, TOURNEY_TABLE_ID)) {
     const id = keyToId(rec);
     caches.bracketById.set(id, readStaticUint(rec.staticData, TOURNEY_BRACKET_OFFSET, 1));
@@ -137,14 +156,14 @@ export function extractNotifEvents(
     log.warn("owner not in cache; skipping notification", { what, key, block: blockNumber });
   };
 
-  // 2) MINT — only the UNREVEALED→IDLE transition (training/duel returns also
-  //    land IDLE; the prior-state guard is what isolates a genuine mint reveal).
+  // 2) MINT — reveal is the FIRST TaruchiStatus write (prev undefined) landing
+  //    IDLE. Already-seen ids returning to IDLE (training/duel) don't fire.
   for (const rec of setRecordsFor(logs, TARUCHI_STATUS_TABLE_ID)) {
     const id = keyToId(rec);
     const state = readStaticUint(rec.staticData, STATUS_STATE_OFFSET, 1);
-    const prev = caches.lastStateById.get(id);
+    const firstWrite = !caches.lastStateById.has(id);
     caches.lastStateById.set(id, state);
-    if (state === STATE_IDLE && prev === STATE_UNREVEALED) {
+    if (firstWrite && state === STATE_IDLE) {
       const owner = caches.ownerById.get(id);
       if (!owner) {
         warnMiss("mint", id);
@@ -154,16 +173,13 @@ export function extractNotifEvents(
     }
   }
 
-  // 3) DUEL — fire once on the transition into COMPLETED, for both players.
-  for (const rec of setRecordsFor(logs, DUEL_TABLE_ID)) {
+  // 3) DUEL + FESTIVAL — both resolve by writing TourneyResult. Branch on the id:
+  //    a known duel → both players; else a festival-bracket tourney → all entrants.
+  for (const rec of setRecordsFor(logs, TOURNEY_RESULT_TABLE_ID)) {
     const id = keyToId(rec);
-    const status = readStaticUint(rec.staticData, DUEL_STATUS_OFFSET, 1);
-    const prev = caches.lastDuelStatus.get(id);
-    caches.lastDuelStatus.set(id, status);
-    if (status === TOURNEY_STATE_COMPLETED && prev !== TOURNEY_STATE_COMPLETED) {
-      const aIdx = readStaticUint(rec.staticData, DUEL_A_OFFSET, 4);
-      const bIdx = readStaticUint(rec.staticData, DUEL_B_OFFSET, 4);
-      for (const idx of [aIdx, bIdx]) {
+    const duel = caches.duelPlayersById.get(id);
+    if (duel) {
+      for (const idx of duel) {
         if (idx === 0) continue;
         const owner = caches.ownerByIndex.get(idx);
         if (!owner) {
@@ -172,15 +188,10 @@ export function extractNotifEvents(
         }
         events.push({ type: "duel", recipient_wallet: owner, taruchi_id: id });
       }
+      continue;
     }
-  }
-
-  // 4) FESTIVAL — the TourneyResult write is the resolve signal (mirrors
-  //    tourneyAnnouncementProjector). Notify every entrant of a festival bracket.
-  for (const rec of setRecordsFor(logs, TOURNEY_RESULT_TABLE_ID)) {
-    const id = keyToId(rec);
     const bracket = caches.bracketById.get(id);
-    if (bracket === undefined || !FESTIVAL_BRACKETS.has(bracket)) continue; // duel/non-festival
+    if (bracket === undefined || !FESTIVAL_BRACKETS.has(bracket)) continue; // unknown / non-festival
     const packed = caches.playersById.get(id);
     if (packed === undefined) {
       warnMiss("festival", id);
@@ -214,7 +225,10 @@ function payloadFor(type: NotifEvent["type"]): { title: string; body: string; ur
 /**
  * Insert notification_events. Idempotent via the table's UNIQUE
  * (type, recipient_wallet, taruchi_id, block_number) dedup constraint —
- * onConflict ignore makes reorg/catch-up replays no-op.
+ * onConflict ignore makes same-block reorg replays no-op. (A resolve reorged to
+ * a DIFFERENT block AND the indexer restarting in between is the one
+ * double-notify window; one-shot events make it benign. The constraint columns
+ * live in the prologue-supabase migration — keep this onConflict in lockstep.)
  */
 async function publish(supabase: SupabaseClient, events: NotifEvent[], blockNumber: number): Promise<number> {
   if (events.length === 0) return 0;
@@ -237,8 +251,8 @@ export function createNotificationEventProjector(): Projector {
   return {
     name: "notification-event",
     onBlock: async (logs: readonly StorageAdapterLog[], ctx: ProjectorContext): Promise<void> => {
-      // Always update caches (we need prior state across blocks), but only
-      // publish once caught up so historical backfill doesn't blast old players.
+      // Always update caches (we need prior-seen + enroll info across blocks),
+      // but only publish once caught up so backfill doesn't blast old players.
       const events = extractNotifEvents(logs, caches, ctx.blockNumber);
       if (events.length === 0 || !ctx.isCaughtUp()) return;
       const inserted = await publish(ctx.supabase, events, ctx.blockNumber);

@@ -13,6 +13,8 @@ const TOURNEY_RESULT = resourceToHex({ type: "offchainTable", namespace: "app", 
 const OWNER_A = ("0x" + "a".repeat(40)) as Hex;
 const OWNER_B = ("0x" + "b".repeat(40)) as Hex;
 
+const IDLE = 1;
+
 function mkSetRecord(tableId: Hex, id: bigint, staticData: Hex): StorageAdapterLog {
   return {
     eventName: "Store_SetRecord",
@@ -32,22 +34,23 @@ function statusLog(id: bigint, state: number): StorageAdapterLog {
     concatHex([numberToHex(0, { size: 1 }), numberToHex(state, { size: 1 }), numberToHex(0n, { size: 34 })]),
   );
 }
-// Duel: aIdx u32 @0, bIdx u32 @4, bracket u8 @8, status u8 @9, specs u256 @10
-function duelLog(id: bigint, a: number, b: number, status: number): StorageAdapterLog {
+// Duel ENROLL SetRecord: aIdx u32 @0, bIdx u32 @4, bracket u8 @8, status u8 @9, specs u256 @10
+// (resolve is a status splice we don't watch — we trigger off TourneyResult).
+function duelEnrollLog(id: bigint, a: number, b: number): StorageAdapterLog {
   return mkSetRecord(
     DUEL,
     id,
     concatHex([
       numberToHex(a, { size: 4 }),
       numberToHex(b, { size: 4 }),
-      numberToHex(0, { size: 1 }),
-      numberToHex(status, { size: 1 }),
-      numberToHex(0n, { size: 32 }),
+      numberToHex(1, { size: 1 }), // bracket
+      numberToHex(1, { size: 1 }), // status = ACTIVE
+      numberToHex(0n, { size: 32 }), // specs
     ]),
   );
 }
-// Tourney: players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
-function tourneyLog(id: bigint, bracket: number, packedPlayers: bigint): StorageAdapterLog {
+// Tourney enroll: players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+function tourneyEnrollLog(id: bigint, bracket: number, packedPlayers: bigint): StorageAdapterLog {
   return mkSetRecord(
     TOURNEY,
     id,
@@ -59,12 +62,11 @@ function tourneyLog(id: bigint, bracket: number, packedPlayers: bigint): Storage
     ]),
   );
 }
-// TourneyResult: placements u256 @0, time u32 @32
+// TourneyResult: the resolve signal for BOTH duels and festivals (full SetRecord).
 function tourneyResultLog(id: bigint): StorageAdapterLog {
   return mkSetRecord(TOURNEY_RESULT, id, concatHex([numberToHex(0n, { size: 32 }), numberToHex(0, { size: 4 })]));
 }
 
-/** pack indices into a uint32[8] word (slot order irrelevant to the projector). */
 function packPlayers(...idx: number[]): bigint {
   let p = 0n;
   idx.forEach((v, i) => {
@@ -82,45 +84,46 @@ describe("unpackIndices", () => {
 });
 
 describe("extractNotifEvents — MINT", () => {
-  it("fires only on the UNREVEALED→IDLE transition", () => {
+  it("fires on the FIRST TaruchiStatus write landing IDLE (the reveal)", () => {
     const c = emptyCaches();
-    // mint commit: Core + status UNREVEALED → no event, learns owner + prior state
-    expect(extractNotifEvents([coreLog(1n, OWNER_A, 10), statusLog(1n, 0)], c, 1)).toEqual([]);
-    // reveal: status IDLE → mint
-    const ev = extractNotifEvents([statusLog(1n, 1)], c, 2);
+    // mint writes Core; reveal is the first Status write, set directly to IDLE.
+    const ev = extractNotifEvents([coreLog(1n, OWNER_A, 10), statusLog(1n, IDLE)], c, 1);
     expect(ev).toEqual([{ type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" }]);
   });
 
-  it("does NOT fire on IDLE without a prior UNREVEALED (training/duel return)", () => {
+  it("does NOT re-fire on a later IDLE write (training/duel return to IDLE)", () => {
     const c = emptyCaches();
-    c.ownerById.set("1", OWNER_A);
-    c.lastStateById.set("1", 6); // prior = TRAINING
-    expect(extractNotifEvents([statusLog(1n, 1)], c, 5)).toEqual([]);
+    extractNotifEvents([coreLog(1n, OWNER_A, 10), statusLog(1n, IDLE)], c, 1); // reveal (fires)
+    expect(extractNotifEvents([statusLog(1n, IDLE)], c, 9)).toEqual([]); // already seen
   });
 
   it("skips when the owner isn't cached", () => {
     const c = emptyCaches();
-    c.lastStateById.set("1", 0);
-    expect(extractNotifEvents([statusLog(1n, 1)], c, 5)).toEqual([]);
+    expect(extractNotifEvents([statusLog(5n, IDLE)], c, 1)).toEqual([]);
   });
 });
 
-describe("extractNotifEvents — DUEL", () => {
-  it("fires once on transition to COMPLETED, for both players", () => {
+describe("extractNotifEvents — DUEL (resolves via TourneyResult, not a status splice)", () => {
+  it("fires for both players when the duel's TourneyResult is written", () => {
     const c = emptyCaches();
-    extractNotifEvents([coreLog(100n, OWNER_A, 10), coreLog(200n, OWNER_B, 20)], c, 1); // learn owners
-    const ev = extractNotifEvents([duelLog(999n, 10, 20, 2)], c, 2);
-    expect(ev).toEqual([
+    // enroll: learn owners + duel player indices. No event yet.
+    expect(
+      extractNotifEvents([coreLog(100n, OWNER_A, 10), coreLog(200n, OWNER_B, 20), duelEnrollLog(999n, 10, 20)], c, 1),
+    ).toEqual([]);
+    // resolve: TourneyResult write for the duel id.
+    expect(extractNotifEvents([tourneyResultLog(999n)], c, 2)).toEqual([
       { type: "duel", recipient_wallet: OWNER_A, taruchi_id: "999" },
       { type: "duel", recipient_wallet: OWNER_B, taruchi_id: "999" },
     ]);
   });
 
-  it("does NOT re-fire while already COMPLETED", () => {
+  it("skips a duel player whose owner isn't cached", () => {
     const c = emptyCaches();
-    c.ownerByIndex.set(10, OWNER_A);
-    c.lastDuelStatus.set("999", 2); // already completed
-    expect(extractNotifEvents([duelLog(999n, 10, 0, 2)], c, 3)).toEqual([]);
+    c.ownerByIndex.set(10, OWNER_A); // only player 10 known
+    extractNotifEvents([duelEnrollLog(999n, 10, 20)], c, 1);
+    expect(extractNotifEvents([tourneyResultLog(999n)], c, 2)).toEqual([
+      { type: "duel", recipient_wallet: OWNER_A, taruchi_id: "999" },
+    ]);
   });
 });
 
@@ -128,7 +131,7 @@ describe("extractNotifEvents — FESTIVAL", () => {
   it("notifies every entrant on the result of a festival bracket", () => {
     const c = emptyCaches();
     extractNotifEvents([coreLog(100n, OWNER_A, 10), coreLog(200n, OWNER_B, 20)], c, 1);
-    extractNotifEvents([tourneyLog(5000n, 5, packPlayers(10, 20))], c, 2); // enroll: bracket 5 (festival)
+    extractNotifEvents([tourneyEnrollLog(5000n, 5, packPlayers(10, 20))], c, 2); // bracket 5 = festival
     const ev = extractNotifEvents([tourneyResultLog(5000n)], c, 3);
     expect(ev).toEqual(
       expect.arrayContaining([
@@ -139,10 +142,10 @@ describe("extractNotifEvents — FESTIVAL", () => {
     expect(ev).toHaveLength(2);
   });
 
-  it("ignores non-festival (duel-tier) brackets", () => {
+  it("ignores a non-festival (duel-tier) tourney bracket", () => {
     const c = emptyCaches();
     c.ownerByIndex.set(10, OWNER_A);
-    extractNotifEvents([tourneyLog(6000n, 2, packPlayers(10))], c, 1); // bracket 2 = Veteran (not festival)
+    extractNotifEvents([tourneyEnrollLog(6000n, 2, packPlayers(10))], c, 1); // bracket 2 = Veteran
     expect(extractNotifEvents([tourneyResultLog(6000n)], c, 2)).toEqual([]);
   });
 });

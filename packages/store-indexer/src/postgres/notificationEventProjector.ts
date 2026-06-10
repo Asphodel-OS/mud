@@ -96,6 +96,11 @@ export type NotifCaches = {
   duelPlayersById: Map<string, [number, number]>;
   playersById: Map<string, bigint>;
   bracketById: Map<string, number>;
+  /** Highest block processed — used to detect a reorg replay (block regresses).
+   *  The indexer recovers from ReorgError in-process (no restart), so caches
+   *  persist; without this, lastStateById would silence a legit re-revealed
+   *  mint after a reorg. -1 = nothing processed yet. */
+  highWaterBlock: number;
 };
 
 export function emptyCaches(): NotifCaches {
@@ -106,6 +111,7 @@ export function emptyCaches(): NotifCaches {
     duelPlayersById: new Map(),
     playersById: new Map(),
     bracketById: new Map(),
+    highWaterBlock: -1,
   };
 }
 
@@ -125,6 +131,19 @@ export function extractNotifEvents(
   caches: NotifCaches,
   blockNumber: number,
 ): NotifEvent[] {
+  // 0) Reorg detection. The indexer recovers from ReorgError in-process and
+  //    re-processes from the common ancestor, so blockNumber regresses. Clear
+  //    the mint-seen gate so a reveal in the replayed range can re-fire — the
+  //    notification_events dedup (same block) absorbs a same-block replay, and
+  //    a genuinely re-mined reveal re-notifying once beats permanent silence.
+  //    Owner/enroll caches are learned facts (taught before the boundary) — keep
+  //    them so replayed resolves can still resolve recipients.
+  if (blockNumber < caches.highWaterBlock) {
+    log.info("reorg replay detected — clearing mint-seen gate", { blockNumber, from: caches.highWaterBlock });
+    caches.lastStateById.clear();
+  }
+  caches.highWaterBlock = Math.max(caches.highWaterBlock, blockNumber);
+
   // 1) Learn owners (TaruchiCore is written at mint/reroll, before any resolve).
   for (const rec of setRecordsFor(logs, TARUCHI_CORE_TABLE_ID)) {
     const id = keyToId(rec);
@@ -191,7 +210,14 @@ export function extractNotifEvents(
       continue;
     }
     const bracket = caches.bracketById.get(id);
-    if (bracket === undefined || !FESTIVAL_BRACKETS.has(bracket)) continue; // unknown / non-festival
+    if (bracket === undefined) {
+      // Neither a known duel nor a known tourney — enroll write never seen
+      // (indexer started after it). Surfaced so missed notifications aren't
+      // invisible (mirrors tourneyAnnouncementProjector's warn).
+      warnMiss("result-unknown-id", id);
+      continue;
+    }
+    if (!FESTIVAL_BRACKETS.has(bracket)) continue; // known non-festival tourney — intentional skip
     const packed = caches.playersById.get(id);
     if (packed === undefined) {
       warnMiss("festival", id);
@@ -255,8 +281,11 @@ export function createNotificationEventProjector(): Projector {
       // but only publish once caught up so backfill doesn't blast old players.
       const events = extractNotifEvents(logs, caches, ctx.blockNumber);
       if (events.length === 0 || !ctx.isCaughtUp()) return;
-      const inserted = await publish(ctx.supabase, events, ctx.blockNumber);
-      log.info("published", { events: inserted, block: ctx.blockNumber });
+      // `attempted` not `inserted`: the upsert uses ignoreDuplicates, which
+      // returns no count, so dedup'd rows (e.g. same-block reorg replay) are
+      // omitted silently — we can only report what we sent, not what landed.
+      const attempted = await publish(ctx.supabase, events, ctx.blockNumber);
+      log.info("published", { attempted, block: ctx.blockNumber });
     },
   };
 }

@@ -101,6 +101,14 @@ describe("extractNotifEvents — MINT", () => {
     const c = emptyCaches();
     expect(extractNotifEvents([statusLog(5n, IDLE)], c, 1)).toEqual([]);
   });
+
+  it("re-fires a reveal after a reorg replay (block regresses → mint-seen gate cleared)", () => {
+    const c = emptyCaches();
+    extractNotifEvents([coreLog(1n, OWNER_A, 10), statusLog(1n, IDLE)], c, 100); // reveal at block 100
+    // reorg: indexer re-processes from an earlier block; the reveal re-lands.
+    const ev = extractNotifEvents([statusLog(1n, IDLE)], c, 98);
+    expect(ev).toEqual([{ type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" }]);
+  });
 });
 
 describe("extractNotifEvents — DUEL (resolves via TourneyResult, not a status splice)", () => {

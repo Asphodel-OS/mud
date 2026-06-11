@@ -96,11 +96,13 @@ export type NotifCaches = {
   duelPlayersById: Map<string, [number, number]>;
   playersById: Map<string, bigint>;
   bracketById: Map<string, number>;
-  /** Highest block processed — used to detect a reorg replay (block regresses).
-   *  The indexer recovers from ReorgError in-process (no restart), so caches
-   *  persist; without this, lastStateById would silence a legit re-revealed
-   *  mint after a reorg. -1 = nothing processed yet. */
-  highWaterBlock: number;
+  /** The previous block processed — used to detect a reorg replay (block
+   *  regresses below it exactly once, at the boundary). NOT a high-water max:
+   *  tracking the last block means subsequent replayed blocks climb forward and
+   *  don't re-trigger the gate clear. The indexer recovers from ReorgError
+   *  in-process (no restart), so caches persist; without this, lastStateById
+   *  would silence a legit re-revealed mint after a reorg. -1 = none yet. */
+  lastBlock: number;
 };
 
 export function emptyCaches(): NotifCaches {
@@ -111,7 +113,7 @@ export function emptyCaches(): NotifCaches {
     duelPlayersById: new Map(),
     playersById: new Map(),
     bracketById: new Map(),
-    highWaterBlock: -1,
+    lastBlock: -1,
   };
 }
 
@@ -132,17 +134,18 @@ export function extractNotifEvents(
   blockNumber: number,
 ): NotifEvent[] {
   // 0) Reorg detection. The indexer recovers from ReorgError in-process and
-  //    re-processes from the common ancestor, so blockNumber regresses. Clear
-  //    the mint-seen gate so a reveal in the replayed range can re-fire — the
-  //    notification_events dedup (same block) absorbs a same-block replay, and
-  //    a genuinely re-mined reveal re-notifying once beats permanent silence.
-  //    Owner/enroll caches are learned facts (taught before the boundary) — keep
-  //    them so replayed resolves can still resolve recipients.
-  if (blockNumber < caches.highWaterBlock) {
-    log.info("reorg replay detected — clearing mint-seen gate", { blockNumber, from: caches.highWaterBlock });
+  //    re-processes from the common ancestor, so blockNumber regresses ONCE at
+  //    the boundary, then climbs again. Clear the mint-seen gate exactly at that
+  //    boundary so a reveal in the replayed range can re-fire — but track the
+  //    PREVIOUS block (not a high-water max), or every replayed block would stay
+  //    below the peak and re-clear the gate on each one, wiping prior-state
+  //    accumulated during the replay (→ false mints once caught up). Owner/enroll
+  //    caches are learned facts (taught before the boundary) — kept either way.
+  if (blockNumber < caches.lastBlock) {
+    log.info("reorg replay detected — clearing mint-seen gate", { blockNumber, from: caches.lastBlock });
     caches.lastStateById.clear();
   }
-  caches.highWaterBlock = Math.max(caches.highWaterBlock, blockNumber);
+  caches.lastBlock = blockNumber;
 
   // 1) Learn owners (TaruchiCore is written at mint/reroll, before any resolve).
   for (const rec of setRecordsFor(logs, TARUCHI_CORE_TABLE_ID)) {

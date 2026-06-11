@@ -109,6 +109,20 @@ describe("extractNotifEvents — MINT", () => {
     const ev = extractNotifEvents([statusLog(1n, IDLE)], c, 98);
     expect(ev).toEqual([{ type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" }]);
   });
+
+  it("preserves prior-state ACROSS replayed blocks — the gate clears once at the boundary, not every block", () => {
+    const c = emptyCaches();
+    extractNotifEvents([coreLog(1n, OWNER_A, 10)], c, 100); // learn owner, lastBlock=100
+    // reorg boundary: block regresses to 98. Reveal re-lands here (first write
+    // since the gate cleared) → mint re-fires. This is the boundary block.
+    expect(extractNotifEvents([statusLog(1n, IDLE)], c, 98)).toEqual([
+      { type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" },
+    ]);
+    // Next replayed block (99 > 98) climbs forward — must NOT re-clear the gate.
+    // A training-return-to-IDLE on the already-revealed taru must stay silent.
+    // (With the old Math.max bug, 99 < highWater(100) re-cleared → false mint.)
+    expect(extractNotifEvents([statusLog(1n, IDLE)], c, 99)).toEqual([]);
+  });
 });
 
 describe("extractNotifEvents — DUEL (resolves via TourneyResult, not a status splice)", () => {

@@ -23,6 +23,7 @@ import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
 import { createSupabasePushAdapter } from "../postgres/supabasePush";
 import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
+import { createNotificationEventProjector } from "../postgres/notificationEventProjector";
 import { logger } from "../logger";
 import packageJson from "../../package.json";
 
@@ -77,7 +78,7 @@ const supabasePush = createSupabasePushAdapter({
   supabaseUrl: env.SUPABASE_URL,
   serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
   isCaughtUp: () => isCaughtUp,
-  projectors: [createTourneyAnnouncementProjector()],
+  projectors: [createTourneyAnnouncementProjector(), createNotificationEventProjector()],
 });
 
 async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Promise<bigint> {

@@ -18,7 +18,12 @@ services:
     build:
       context: .
       target: store-indexer
-    command: pnpm tsx src/bin/postgres-decoded-indexer.ts
+      args:
+        GIT_SHA: "${GIT_SHA:-unknown}"
+    # exec node directly (not `pnpm tsx`) so SIGTERM reaches the Node process
+    # that owns the graceful-shutdown handler; init: true reaps + forwards.
+    command: node --import tsx src/bin/postgres-decoded-indexer.ts
+    init: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -36,13 +41,22 @@ services:
       SUPABASE_URL: "${SUPABASE_URL:-}"
       SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
       PUBLISH_RESULTS_TO_SUPABASE: "${PUBLISH_RESULTS_TO_SUPABASE:-}"
+      # Grafana Cloud Loki log shipping (optional). Empty URL = stdout-only;
+      # logs are always teed onto stdout regardless. Get URL + numeric user id +
+      # token from the Grafana Cloud "Send Logs" page.
+      LOG_SERVICE: "indexer-store"
+      GRAFANA_LOKI_URL: "${GRAFANA_LOKI_URL:-}"
+      GRAFANA_LOKI_USER: "${GRAFANA_LOKI_USER:-}"
+      GRAFANA_LOKI_API_KEY: "${GRAFANA_LOKI_API_KEY:-}"
+      GRAFANA_LOKI_ENV: "${GRAFANA_LOKI_ENV:-}"
     restart: unless-stopped
 
   frontend:
     build:
       context: .
       target: store-indexer
-    command: pnpm tsx src/bin/postgres-frontend.ts
+    command: node --import tsx src/bin/postgres-frontend.ts
+    init: true
     depends_on:
       db:
         condition: service_healthy
@@ -53,6 +67,13 @@ services:
       STORE_ADDRESS: "${STORE_ADDRESS}"
       HOST: "0.0.0.0"
       PORT: "1337"
+      RPC_HTTP_URL: "${RPC_HTTP_URL}"
+      ASCENSION_RECORD_SIGNER_PRIVATE_KEY: "${ASCENSION_RECORD_SIGNER_PRIVATE_KEY:-}"
+      LOG_SERVICE: "indexer-api"
+      GRAFANA_LOKI_URL: "${GRAFANA_LOKI_URL:-}"
+      GRAFANA_LOKI_USER: "${GRAFANA_LOKI_USER:-}"
+      GRAFANA_LOKI_API_KEY: "${GRAFANA_LOKI_API_KEY:-}"
+      GRAFANA_LOKI_ENV: "${GRAFANA_LOKI_ENV:-}"
     ports:
       - "1337:1337"
     restart: unless-stopped

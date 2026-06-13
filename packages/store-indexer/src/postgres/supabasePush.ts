@@ -130,6 +130,7 @@ export function createSupabasePushAdapter(opts: {
             log.error("projector failed", {
               projector: projector.name,
               block: ctx.blockNumber,
+              supabaseUrl: opts.supabaseUrl,
               error: e instanceof Error ? e.message : String(e),
             });
           }

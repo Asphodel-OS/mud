@@ -24,7 +24,7 @@ import { ReorgError } from "../postgres/ReorgError";
 import { createSupabasePushAdapter } from "../postgres/supabasePush";
 import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
 import { createNotificationEventProjector } from "../postgres/notificationEventProjector";
-import { logger } from "../logger";
+import { logger, flushLogs } from "../logger";
 import packageJson from "../../package.json";
 
 const env = parseEnv(
@@ -51,7 +51,25 @@ const env = parseEnv(
   ),
 );
 
-logger.info("starting postgres-decoded-indexer", { version: packageJson.version });
+logger.info("starting postgres-decoded-indexer", {
+  version: packageJson.version,
+  commit: process.env.GIT_SHA ?? "unknown",
+  node: process.version,
+});
+
+// Register before the top-level awaits below so a SIGTERM during the initial
+// RPC/DB connect still flushes and exits 0 instead of hitting Node's default.
+let shuttingDown = false;
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info("shutting down", { signal });
+  await flushLogs();
+  process.exit(0);
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
 
 const clientOptions = await getClientOptions(env);
 const publicClient = getRpcClient(clientOptions);
@@ -213,7 +231,8 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error) => {
+run().catch(async (error) => {
   logger.error("fatal error", { error });
+  await flushLogs();
   process.exit(1);
 });

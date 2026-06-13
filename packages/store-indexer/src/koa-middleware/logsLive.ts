@@ -7,6 +7,20 @@ import { logger } from "../logger";
 
 const log = logger.child({ component: "logs-live" });
 
+const activeStreams = new Set<() => void>();
+
+// Graceful shutdown calls this so long-lived SSE responses end instead of
+// blocking httpServer.close() until the platform SIGKILLs the process.
+export function closeLiveStreams(): void {
+  for (const teardown of activeStreams) {
+    try {
+      teardown();
+    } catch {
+      // one stuck stream must not block the rest of shutdown
+    }
+  }
+}
+
 type LogsLiveOptions = {
   storedBlockLogs$: Observable<StorageAdapterBlock>;
 };
@@ -76,12 +90,19 @@ export function logsLive({ storedBlockLogs$ }: LogsLiveOptions): Middleware {
     let closeResolve: (() => void) | undefined;
 
     function cleanup(): void {
+      activeStreams.delete(teardown);
       subscription?.unsubscribe();
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       subscription = undefined;
       heartbeatInterval = undefined;
       closeResolve?.();
     }
+
+    function teardown(): void {
+      if (!ctx.res.writableEnded) ctx.res.end();
+      cleanup();
+    }
+    activeStreams.add(teardown);
 
     ctx.req.once("close", () => {
       log.info("client disconnected", { address: address ?? "*" });

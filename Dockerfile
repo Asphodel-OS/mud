@@ -65,6 +65,8 @@ RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm turbo run build --filter=@lattic
 
 # Stage 3: slim store-indexer image (no Foundry, no build tools)
 FROM base AS store-indexer
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
 WORKDIR /app
 COPY --from=builder /app .
 WORKDIR /app/packages/store-indexer

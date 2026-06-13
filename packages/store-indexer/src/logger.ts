@@ -1,3 +1,5 @@
+import { createLokiTransport, type LokiTransport } from "./lokiTransport";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 type LogData = Record<string, unknown>;
 
@@ -13,6 +15,22 @@ const LEVELS: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 
 
 const minLevel = LEVELS[(process.env.LOG_LEVEL as LogLevel) ?? "info"] ?? LEVELS.info;
 const pretty = process.env.LOG_FORMAT === "pretty";
+
+const service = process.env.LOG_SERVICE ?? "store-indexer";
+const lokiUrl = process.env.GRAFANA_LOKI_URL ?? "";
+
+const transport: LokiTransport | null = lokiUrl
+  ? createLokiTransport({
+      url: lokiUrl,
+      user: process.env.GRAFANA_LOKI_USER ?? "",
+      apiKey: process.env.GRAFANA_LOKI_API_KEY ?? "",
+      labels: { service, env: process.env.GRAFANA_LOKI_ENV ?? "" },
+      batchSize: 100,
+      batchIntervalMs: 2000,
+      timeoutMs: 5000,
+      queueSize: 10000,
+    })
+  : null;
 
 function replacer(_key: string, value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
@@ -33,14 +51,18 @@ function createLogger(service: string, base: LogData = {}): Logger {
   function emit(level: LogLevel, msg: string, data?: LogData): void {
     if (LEVELS[level] < minLevel) return;
 
-    const entry: Record<string, unknown> = { ts: new Date().toISOString(), level, service, ...base, msg, ...data };
-    const line = pretty ? formatPretty(entry) : JSON.stringify(entry, replacer);
+    const nowMs = Date.now();
+    const entry: Record<string, unknown> = { ts: new Date(nowMs).toISOString(), level, service, ...base, msg, ...data };
+    const jsonLine = JSON.stringify(entry, replacer);
+    const stdoutLine = pretty ? formatPretty(entry) : jsonLine;
 
     if (level === "error") {
-      process.stderr.write(line + "\n");
+      process.stderr.write(stdoutLine + "\n");
     } else {
-      process.stdout.write(line + "\n");
+      process.stdout.write(stdoutLine + "\n");
     }
+
+    transport?.enqueue({ ts: nowMs, level, line: jsonLine });
   }
 
   return {
@@ -52,5 +74,9 @@ function createLogger(service: string, base: LogData = {}): Logger {
   };
 }
 
+export async function flushLogs(timeoutMs = 3000): Promise<void> {
+  await transport?.close(timeoutMs);
+}
+
 export type { Logger, LogData, LogLevel };
-export const logger = createLogger("store-indexer");
+export const logger = createLogger(service);

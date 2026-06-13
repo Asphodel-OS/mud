@@ -16,10 +16,10 @@ import { sentry } from "../koa-middleware/sentry";
 import { healthcheck } from "../koa-middleware/healthcheck";
 import { helloWorld } from "../koa-middleware/helloWorld";
 import { metrics } from "../koa-middleware/metrics";
-import { logsLive } from "../koa-middleware/logsLive";
+import { logsLive, closeLiveStreams } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
 import { createLeaderboardCache } from "../postgres/aggregateCache";
-import { logger } from "../logger";
+import { logger, flushLogs } from "../logger";
 import packageJson from "../../package.json";
 
 const env = parseEnv(
@@ -127,5 +127,26 @@ server.use(
   }),
 );
 
-server.listen({ host: env.HOST, port: env.PORT });
+const httpServer = server.listen({ host: env.HOST, port: env.PORT });
 logger.info("starting postgres-frontend", { version: packageJson.version, host: env.HOST, port: env.PORT });
+
+let shuttingDown = false;
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info("shutting down", { signal });
+  // End live SSE responses first, then bound close() so an un-terminated
+  // socket can never hold shutdown past the grace window.
+  closeLiveStreams();
+  await Promise.race([
+    new Promise<void>((resolve) => httpServer.close(() => resolve())),
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, 2000).unref();
+    }),
+  ]);
+  await flushLogs();
+  process.exit(0);
+}
+
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));

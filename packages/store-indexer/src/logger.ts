@@ -74,7 +74,7 @@ function createLogger(service: string, base: LogData = {}): Logger {
   };
 }
 
-export async function flushLogs(timeoutMs = 3000): Promise<void> {
+export async function flushLogs(timeoutMs = 6000): Promise<void> {
   await transport?.close(timeoutMs);
 }
 

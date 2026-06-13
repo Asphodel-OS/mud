@@ -251,6 +251,46 @@ function payloadFor(type: NotifEvent["type"]): { title: string; body: string; ur
   }
 }
 
+// No type_training: the projector never emits training events (delivery deferred).
+type SubRow = { wallet: string; type_mint: boolean; type_duel: boolean; type_festival: boolean };
+
+/**
+ * Drop events whose recipient isn't subscribed for that type — the opt-in gate,
+ * at the source. One batched read per block (`wallet IN (…)`), the producer's
+ * only DB read.
+ *
+ * Without it every resolution writes a row for every player, each firing the DB
+ * webhook → a send-push that finds nothing: cost scales with DAU, not opt-in,
+ * and the per-row pg_net queue backs up first. send-push re-checks at delivery
+ * regardless (closes the unsubscribe-after-write race), so this only trims the
+ * upstream no-op fan-out.
+ *
+ * Fail-closed: a read error throws (the adapter logs + isolates it), skipping a
+ * block's notifications rather than blasting them. Cold start: a wallet that
+ * subscribes after its event's block is processed misses it once — benign for
+ * one-shot events.
+ */
+export async function filterToSubscribed(supabase: SupabaseClient, events: NotifEvent[]): Promise<NotifEvent[]> {
+  if (events.length === 0) return events;
+  const wallets = [...new Set(events.map((e) => e.recipient_wallet))];
+  const { data, error } = await supabase
+    .from("push_subscriptions")
+    .select("wallet, type_mint, type_duel, type_festival")
+    .in("wallet", wallets);
+  if (error) throw new Error(`read push_subscriptions failed: ${error.message}`);
+
+  // wallet → enabled types, unioned across its device rows.
+  const enabled = new Map<string, Set<NotifEvent["type"]>>();
+  for (const row of (data ?? []) as SubRow[]) {
+    let set = enabled.get(row.wallet);
+    if (!set) enabled.set(row.wallet, (set = new Set()));
+    if (row.type_mint) set.add("mint");
+    if (row.type_duel) set.add("duel");
+    if (row.type_festival) set.add("festival");
+  }
+  return events.filter((e) => enabled.get(e.recipient_wallet)?.has(e.type));
+}
+
 /**
  * Insert notification_events. Idempotent via the table's UNIQUE
  * (type, recipient_wallet, taruchi_id, block_number) dedup constraint —
@@ -284,11 +324,14 @@ export function createNotificationEventProjector(): Projector {
       // but only publish once caught up so backfill doesn't blast old players.
       const events = extractNotifEvents(logs, caches, ctx.blockNumber);
       if (events.length === 0 || !ctx.isCaughtUp()) return;
+      // Opt-in gate at the source: no row / webhook / send-push for non-subscribers.
+      const deliverable = await filterToSubscribed(ctx.supabase, events);
+      if (deliverable.length === 0) return;
       // `attempted` not `inserted`: the upsert uses ignoreDuplicates, which
       // returns no count, so dedup'd rows (e.g. same-block reorg replay) are
       // omitted silently — we can only report what we sent, not what landed.
-      const attempted = await publish(ctx.supabase, events, ctx.blockNumber);
-      log.info("published", { attempted, block: ctx.blockNumber });
+      const attempted = await publish(ctx.supabase, deliverable, ctx.blockNumber);
+      log.info("published", { attempted, candidates: events.length, block: ctx.blockNumber });
     },
   };
 }

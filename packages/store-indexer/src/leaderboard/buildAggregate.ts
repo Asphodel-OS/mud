@@ -302,8 +302,9 @@ export function buildAggregate(input: BuildAggregateInput): LeaderboardAggregate
       row.tournaments += 1;
       row.onyxEarnedWei += rewardWei;
       row.onyxSpentWei += entryFeeWei;
-      // Duels never contribute to festivalWins.
-      if (placement < row.bestPlacement) row.bestPlacement = placement;
+      // Duels never contribute to festivalWins OR bestPlacement: "best
+      // placement" is a festival-podium stat, and a duel's [winner, loser]
+      // pack would otherwise read as a 1st/2nd festival placement.
 
       // Mirror into per-taru accumulator.
       const taru = taruRowFor(idx, owner);
@@ -313,7 +314,6 @@ export function buildAggregate(input: BuildAggregateInput): LeaderboardAggregate
         taru.tournaments += 1;
         taru.onyxEarnedWei += rewardWei;
         taru.onyxSpentWei += entryFeeWei;
-        if (placement < taru.bestPlacement) taru.bestPlacement = placement;
       }
     }
   }

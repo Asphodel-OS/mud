@@ -72,6 +72,10 @@ describe("buildAggregate", () => {
     expect(out.overall[1].wallet).toBe("0xbbb");
     expect(out.overall[1].wins).toBe(0);
     expect(out.overall[1].festivalWins).toBe(0);
+    // bestPlacement is a festival-podium stat: duels must NOT set it, so both
+    // duel-only players stay at the never-placed sentinel (8).
+    expect(out.overall[0].bestPlacement).toBe(8);
+    expect(out.overall[1].bestPlacement).toBe(8);
   });
 
   it("collapses rookie duel + rookie festival wins into one row per wallet", () => {

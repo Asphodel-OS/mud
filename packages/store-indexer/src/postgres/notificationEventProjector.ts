@@ -64,9 +64,10 @@ const STATUS_STATE_OFFSET = 1;
 // Duel : playerAIndex u32 @0, playerBIndex u32 @4, bracket u8 @8, status u8 @9
 const DUEL_A_OFFSET = 0;
 const DUEL_B_OFFSET = 4;
-// Tourney : players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+// Tourney : players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57
+// (specs shrank u256→u192 in the gas-opt B3 change → bracket/status moved -8 bytes)
 const TOURNEY_PLAYERS_OFFSET = 0;
-const TOURNEY_BRACKET_OFFSET = 64;
+const TOURNEY_BRACKET_OFFSET = 56;
 
 /** Read a fixed-length address field as a lowercase 0x-hex string. */
 function readAddress(staticData: Hex, offset: number): string {

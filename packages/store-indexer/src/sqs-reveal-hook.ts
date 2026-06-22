@@ -48,7 +48,10 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
     const state = hexToNumber(sliceHex(staticData, 1, 2));
     if (state !== IDLE_STATE) continue;
 
-    const traits = hexToBigInt(sliceHex(staticData, 14, 19));
+    // traits (uint40) at bytes 8..13. B1 (game2 gas opt) shrank level/trainingPoints
+    // to uint8, moving traits from 14..19 to 8..13. Layout: affinity(1) state(1)
+    // level(1) xp(4) trainingPoints(1) traits(5) stats(16) budIndex(1).
+    const traits = hexToBigInt(sliceHex(staticData, 8, 13));
     codes.push(unpackTraits(traits));
   }
 

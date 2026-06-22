@@ -32,19 +32,11 @@ services:
     environment:
       DATABASE_URL: "postgres://mud:mud@db:5432/mud"
       RPC_HTTP_URL: "${RPC_HTTP_URL}"
-      # When set, the chain is followed via an eth_subscribe newHeads
-      # subscription instead of polling eth_getBlockByNumber every
-      # POLLING_INTERVAL. getClientOptions puts webSocket first in the fallback,
-      # so viem takes the subscription path; HTTP remains the fallback if WS
-      # drops. Must be a provider that supports eth_subscribe (e.g. Alchemy wss).
       RPC_WS_URL: "${RPC_WS_URL:-}"
       STORE_ADDRESS: "${STORE_ADDRESS}"
       START_BLOCK: "${START_BLOCK}"
       FOLLOW_BLOCK_TAG: "latest"
       MAX_BLOCK_RANGE: "1000"
-      # Fallback-only cadence: unused while RPC_WS_URL drives the newHeads
-      # subscription; ~block time so a WS outage degrades to one block fetch per
-      # block, not per second.
       POLLING_INTERVAL: "12000"
       SQS_QUEUE_URL: "${SQS_QUEUE_URL:-}"
       SUPABASE_URL: "${SUPABASE_URL:-}"

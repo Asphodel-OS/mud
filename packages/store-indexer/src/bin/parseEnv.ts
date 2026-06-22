@@ -12,11 +12,6 @@ export const indexerEnvSchema = z.intersection(
     FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("latest"),
     START_BLOCK: z.coerce.bigint().nonnegative().default(0n),
     MAX_BLOCK_RANGE: z.coerce.bigint().positive().default(1000n),
-    // Only governs the HTTP-poll fallback path: when RPC_WS_URL is set, viem
-    // follows the chain via an eth_subscribe newHeads subscription and this
-    // interval is unused (the indexer does no waitForTransactionReceipt). Kept
-    // at ~block time so a WS outage degrades to one eth_getBlockByNumber per
-    // block instead of one per second.
     POLLING_INTERVAL: z.coerce.number().positive().default(12000),
     STORE_ADDRESS: z
       .string()

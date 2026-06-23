@@ -12,7 +12,7 @@ export const indexerEnvSchema = z.intersection(
     FOLLOW_BLOCK_TAG: z.enum(["latest", "safe", "finalized"]).default("latest"),
     START_BLOCK: z.coerce.bigint().nonnegative().default(0n),
     MAX_BLOCK_RANGE: z.coerce.bigint().positive().default(1000n),
-    POLLING_INTERVAL: z.coerce.number().positive().default(1000),
+    POLLING_INTERVAL: z.coerce.number().positive().default(12000),
     STORE_ADDRESS: z
       .string()
       .optional()

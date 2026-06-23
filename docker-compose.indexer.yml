@@ -32,11 +32,12 @@ services:
     environment:
       DATABASE_URL: "postgres://mud:mud@db:5432/mud"
       RPC_HTTP_URL: "${RPC_HTTP_URL}"
+      RPC_WS_URL: "${RPC_WS_URL:-}"
       STORE_ADDRESS: "${STORE_ADDRESS}"
       START_BLOCK: "${START_BLOCK}"
       FOLLOW_BLOCK_TAG: "latest"
       MAX_BLOCK_RANGE: "1000"
-      POLLING_INTERVAL: "1000"
+      POLLING_INTERVAL: "12000"
       SQS_QUEUE_URL: "${SQS_QUEUE_URL:-}"
       SUPABASE_URL: "${SUPABASE_URL:-}"
       SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"

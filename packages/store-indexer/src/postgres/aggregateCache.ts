@@ -179,7 +179,7 @@ export function createLeaderboardCache(
           FROM ${sql(`${schema}.app__taruchi_status`)}
         `,
         sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
-        sql<{ owner: string; index: number; referrer: string; createdBlock: string }[]>`
+        sql<{ owner: string; index: number; referrer: string | null; createdBlock: string }[]>`
           SELECT '0x' || encode(owner, 'hex') AS owner, "index"::int AS index,
             '0x' || encode(referrer, 'hex') AS referrer, created_block::text AS "createdBlock"
           FROM ${sql(`${schema}.app__account`)}

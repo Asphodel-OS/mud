@@ -29,6 +29,13 @@ describe("buildAccountAggregate", () => {
     expect(aggregate.referralCountByReferrer.size).toBe(0);
   });
 
+  it("stores self-referrers as null and does not count them", () => {
+    const aggregate = buildAccountAggregate([{ owner: OWNER_A, index: 1, referrer: OWNER_A, createdBlock: "100" }]);
+
+    expect(aggregate.accountByOwner.get(OWNER_A.toLowerCase())?.referrer).toBeNull();
+    expect(aggregate.referralCountByReferrer.size).toBe(0);
+  });
+
   it("skips invalid or unset account rows", () => {
     const aggregate = buildAccountAggregate([
       { owner: null, index: 1, referrer: REFERRER, createdBlock: "100" },

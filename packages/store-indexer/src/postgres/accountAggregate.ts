@@ -34,7 +34,7 @@ export function buildAccountAggregate(rows: AccountRow[]): AccountAggregate {
     if (!owner || owner === zero || !Number.isFinite(index) || index <= 0) continue;
 
     const referrer = normalizeAddress(row.referrer);
-    const normalizedReferrer = referrer && referrer !== zero ? referrer : null;
+    const normalizedReferrer = referrer && referrer !== zero && referrer !== owner ? referrer : null;
 
     accountByOwner.set(owner, {
       index,

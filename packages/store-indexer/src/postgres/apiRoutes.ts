@@ -64,6 +64,22 @@ function jsonResponse(ctx: Parameters<Middleware>[0], status: number, body: unkn
   ctx.body = jsonBigint(body);
 }
 
+type AccountPayload = {
+  wallet: string;
+  account: ReturnType<LeaderboardCache["getAccount"]>;
+  referralCount: number;
+  computedAt: number;
+};
+
+function accountPayload(leaderboardCache: LeaderboardCache, wallet: string): AccountPayload {
+  return {
+    wallet: wallet.toLowerCase(),
+    account: leaderboardCache.getAccount(wallet),
+    referralCount: leaderboardCache.getReferralCount(wallet),
+    computedAt: leaderboardCache.computedAt(),
+  };
+}
+
 async function getIndexerState(database: Sql): Promise<{ chainId: bigint; indexedBlock: bigint }> {
   const rows = await database<IndexerStateRow[]>`
     SELECT chain_id AS "chainId", block_number AS "indexedBlock"
@@ -170,8 +186,20 @@ export function apiRoutes(
       wallet: wallet.toLowerCase(),
       stats: leaderboardCache.getStats(wallet),
       roster: leaderboardCache.getRoster(wallet),
+      account: leaderboardCache.getAccount(wallet),
+      referralCount: leaderboardCache.getReferralCount(wallet),
       computedAt: leaderboardCache.computedAt(),
     });
+  });
+
+  // Lightweight Account/referral lookup for profile surfaces that do not need
+  // the trainer roster or leaderboard row.
+  router.get("/api/account/:wallet", compress(), async (ctx) => {
+    if (!leaderboardCache.isReady()) {
+      jsonResponse(ctx, 503, { error: "leaderboard cache warming up" });
+      return;
+    }
+    jsonResponse(ctx, 200, accountPayload(leaderboardCache, String(ctx.params.wallet ?? "")));
   });
 
   // One trainer's finished matches (newest first) for the Mine archive.

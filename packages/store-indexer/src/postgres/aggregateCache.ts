@@ -13,6 +13,7 @@ import {
 } from "../leaderboard/onyxConstants";
 import { EMPTY_AGGREGATE, type LeaderboardAggregate, type LeaderboardRow } from "../leaderboard/types";
 import { logger } from "../logger";
+import { buildAccountAggregate, type IndexedAccount } from "./accountAggregate";
 
 const log = logger.child({ component: "leaderboard-cache" });
 const mudSchemaName = transformSchemaName("mud");
@@ -101,6 +102,10 @@ export interface LeaderboardCache {
   getBattles(wallet: string): MatchSummary[];
   /** Full Fighter-Card detail for one taruchi by onchain uint256 id, or null if unknown. */
   getTaruchi(id: string): TaruchiDetail | null;
+  /** Durable wallet-level Account row, or null if the wallet has not created one. */
+  getAccount(wallet: string): IndexedAccount | null;
+  /** Count of Account rows whose immutable referrer points at this wallet. */
+  getReferralCount(wallet: string): number;
   computedAt(): number;
   /** MUD config block used by the current aggregate; null until first successful build. */
   indexedBlock(): bigint | null;
@@ -116,6 +121,8 @@ type CacheState = {
   rosterByOwner: Map<string, TrainerRosterEntry[]>;
   matchesByOwner: Map<string, MatchSummary[]>;
   detailById: Map<string, TaruchiDetail>;
+  accountByOwner: Map<string, IndexedAccount>;
+  referralCountByReferrer: Map<string, number>;
   computedAt: number;
   indexedBlock: bigint | null;
 };
@@ -125,6 +132,8 @@ const EMPTY_STATE: CacheState = {
   rosterByOwner: new Map(),
   matchesByOwner: new Map(),
   detailById: new Map(),
+  accountByOwner: new Map(),
+  referralCountByReferrer: new Map(),
   computedAt: 0,
   indexedBlock: null,
 };
@@ -153,23 +162,29 @@ export function createLeaderboardCache(
     // uint256/uint40 packed fields → ::text then BigInt; small ints → ::int → Number.
     // Decoded tables are schema-qualified by the lowercased store address;
     // sql(`schema.table`) quotes it as an identifier.
-    const [configRows, tourneyRows, duelRows, resultRows, coreRows, statusRows, nameRows] = await Promise.all([
-      sql<{ indexedBlock: string }[]>`
-        SELECT block_number AS "indexedBlock"
-        FROM ${sql(`${mudSchemaName}.config`)}
-        LIMIT 1
-      `,
-      sql`SELECT id::text AS id, players::text AS players, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__tourney`)}`,
-      sql`SELECT id::text AS id, player_a_index::int AS a, player_b_index::int AS b, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__duel`)}`,
-      sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
-      sql`SELECT id::text AS id, "index"::int AS index, '0x' || encode(owner, 'hex') AS owner FROM ${sql(`${schema}.app__taruchi_core`)}`,
-      sql`
-        SELECT id::text AS id, affinity::int AS affinity, state::int AS state, progression::text AS progression,
-          bud_index::int AS "budIndex", traits::text AS traits, stats::text AS stats
-        FROM ${sql(`${schema}.app__taruchi_status`)}
-      `,
-      sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
-    ]);
+    const [configRows, tourneyRows, duelRows, resultRows, coreRows, statusRows, nameRows, accountRows] =
+      await Promise.all([
+        sql<{ indexedBlock: string }[]>`
+          SELECT block_number AS "indexedBlock"
+          FROM ${sql(`${mudSchemaName}.config`)}
+          LIMIT 1
+        `,
+        sql`SELECT id::text AS id, players::text AS players, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__tourney`)}`,
+        sql`SELECT id::text AS id, player_a_index::int AS a, player_b_index::int AS b, bracket::int AS bracket, status::int AS status FROM ${sql(`${schema}.app__duel`)}`,
+        sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
+        sql`SELECT id::text AS id, "index"::int AS index, '0x' || encode(owner, 'hex') AS owner FROM ${sql(`${schema}.app__taruchi_core`)}`,
+        sql`
+          SELECT id::text AS id, affinity::int AS affinity, state::int AS state, progression::text AS progression,
+            bud_index::int AS "budIndex", traits::text AS traits, stats::text AS stats
+          FROM ${sql(`${schema}.app__taruchi_status`)}
+        `,
+        sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
+        sql<{ owner: string; index: number; referrer: string | null; createdBlock: string }[]>`
+          SELECT '0x' || encode(owner, 'hex') AS owner, "index"::int AS index,
+            '0x' || encode(referrer, 'hex') AS referrer, created_block::text AS "createdBlock"
+          FROM ${sql(`${schema}.app__account`)}
+        `,
+      ]);
 
     const tourneys = tourneyRows.map((r) => ({
       id: BigInt(r.id),
@@ -207,6 +222,7 @@ export function createLeaderboardCache(
       };
     });
     const names = nameRows.map((r) => ({ id: BigInt(r.id), name: r.name as string }));
+    const accounts = buildAccountAggregate(accountRows);
 
     const aggregate = buildAggregate({
       tourneys,
@@ -327,6 +343,8 @@ export function createLeaderboardCache(
       rosterByOwner,
       matchesByOwner,
       detailById,
+      accountByOwner: accounts.accountByOwner,
+      referralCountByReferrer: accounts.referralCountByReferrer,
       computedAt: Date.now(),
       indexedBlock: configRows[0]?.indexedBlock ? BigInt(configRows[0].indexedBlock) : null,
     };
@@ -342,6 +360,7 @@ export function createLeaderboardCache(
       wallets: next.aggregate.overall.length,
       tarus: next.aggregate.overallByTaruchi.length,
       owners: next.rosterByOwner.size,
+      accounts: next.accountByOwner.size,
       records: next.aggregate.recordCount,
     });
   }
@@ -413,6 +432,8 @@ export function createLeaderboardCache(
     getRoster: (wallet) => state.rosterByOwner.get(wallet.toLowerCase()) ?? [],
     getBattles: (wallet) => state.matchesByOwner.get(wallet.toLowerCase()) ?? [],
     getTaruchi: (id) => state.detailById.get(id) ?? null,
+    getAccount: (wallet) => state.accountByOwner.get(wallet.toLowerCase()) ?? null,
+    getReferralCount: (wallet) => state.referralCountByReferrer.get(wallet.toLowerCase()) ?? 0,
     computedAt: () => state.computedAt,
     indexedBlock: () => state.indexedBlock,
     rebuildNow,

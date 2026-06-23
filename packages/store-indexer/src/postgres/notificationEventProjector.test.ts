@@ -26,12 +26,12 @@ function mkSetRecord(tableId: Hex, id: bigint, staticData: Hex): StorageAdapterL
 function coreLog(id: bigint, owner: Hex, index: number): StorageAdapterLog {
   return mkSetRecord(CORE, id, concatHex([numberToHex(index, { size: 4 }), owner]));
 }
-// TaruchiStatus: affinity u8 @0, state u8 @1, then 34 trailing bytes
+// TaruchiStatus: affinity u8 @0, state u8 @1, remaining fields occupy bytes @2..32
 function statusLog(id: bigint, state: number): StorageAdapterLog {
   return mkSetRecord(
     STATUS,
     id,
-    concatHex([numberToHex(0, { size: 1 }), numberToHex(state, { size: 1 }), numberToHex(0n, { size: 34 })]),
+    concatHex([numberToHex(0, { size: 1 }), numberToHex(state, { size: 1 }), numberToHex(0n, { size: 30 })]),
   );
 }
 // Duel ENROLL SetRecord: aIdx u32 @0, bIdx u32 @4, bracket u8 @8, status u8 @9, specs u48 @10

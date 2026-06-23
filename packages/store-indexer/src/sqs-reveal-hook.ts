@@ -49,10 +49,8 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
     const state = hexToNumber(sliceHex(staticData, 1, 2));
     if (state !== IDLE_STATE) continue;
 
-    // traits (uint40) at bytes 8..13. level/xp/trainingPoints were collapsed into a
-    // single uint48 `progression` field occupying bytes 2..8 — the same 6 bytes they
-    // used before — so the traits offset is unchanged. Layout: affinity(1) state(1)
-    // progression(6) traits(5) budIndex(1) stats(8) metrics(10).
+    // traits (uint40) at bytes 8..13 in the current layout:
+    // affinity(1) state(1) progression(6) traits(5) budIndex(1) stats(8) metrics(10).
     const traits = hexToBigInt(sliceHex(staticData, 8, 13));
     codes.push(unpackTraits(traits));
   }

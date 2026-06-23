@@ -52,11 +52,11 @@ describe("newAnnouncements", () => {
 const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Tourney" });
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
 
-// Tourney value: players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+// Tourney value: players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57 (B3: specs u256→u192)
 function tourneyEnrollLog(id: bigint, bracket: number): StorageAdapterLog {
   const staticData = concatHex([
     numberToHex(0n, { size: 32 }), // players
-    numberToHex(0n, { size: 32 }), // specs
+    numberToHex(0n, { size: 24 }), // specs (u192)
     numberToHex(bracket, { size: 1 }), // bracket
     numberToHex(1, { size: 1 }), // status = ACTIVE
   ]);

@@ -47,8 +47,9 @@ const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: 
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
 
 // --- static field layouts (from the codegen valueSchemas) ---
-// Tourney value: (players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65)
-const TOURNEY_BRACKET_OFFSET = 64;
+// Tourney value: (players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57)
+// (specs shrank u256→u192 in the gas-opt B3 change → bracket/status moved -8 bytes)
+const TOURNEY_BRACKET_OFFSET = 56;
 // TourneyResult value: (placements u256 @0, time u32 @32)
 const TOURNEY_RESULT_TIME_OFFSET = 32;
 

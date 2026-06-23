@@ -102,7 +102,7 @@ export interface TaruchiStatusRow {
   budIndex: number;
   /** packed uint40 */
   traits: bigint;
-  /** packed uint128 (int16×4) */
+  /** packed uint64 (int16x4) */
   stats: bigint;
 }
 
@@ -130,7 +130,7 @@ function toInt16(value: bigint): number {
   return u >= 0x8000 ? u - 0x10000 : u;
 }
 
-/** uint128 → {health,power,harmony,violence}. Mirrors game2 LibStats.unpack. */
+/** uint64 -> {health,power,harmony,violence}. Mirrors game2 LibStats.unpack. */
 export function unpackStats(packed: bigint): TaruchiStatsValues {
   return {
     health: toInt16(packed & MASK_16),

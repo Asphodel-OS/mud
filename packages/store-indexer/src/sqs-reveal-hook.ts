@@ -19,13 +19,14 @@ const TARUCHI_STATUS_TABLE_ID = resourceToHex({
 
 const IDLE_STATE = 1;
 
-// TaruchiStatus static layout (tightly packed):
-//   offset 0: affinity  (uint8,  1 byte)
-//   offset 1: state     (uint8,  1 byte)
-//   offset 2: level     (uint32, 4 bytes)
-//   offset 6: xp        (uint32, 4 bytes)
-//   offset 10: tp       (uint32, 4 bytes)
-//   offset 14: traits   (uint40, 5 bytes)
+// TaruchiStatus static layout (tightly packed, current schema):
+//   offset 0:  affinity     (uint8,  1 byte)
+//   offset 1:  state        (uint8,  1 byte)
+//   offset 2:  progression  (uint48, 6 bytes — level | trainingPoints<<8 | xp<<16)
+//   offset 8:  traits       (uint40, 5 bytes)
+//   offset 13: budIndex     (uint8,  1 byte)
+//   offset 14: stats        (uint64, 8 bytes)
+//   offset 22: metrics      (uint80, 10 bytes)
 
 export function unpackTraits(traits: bigint): string {
   const body = (traits >> 8n) & 0xffn;
@@ -48,7 +49,9 @@ export function extractRevealCodes(logs: readonly StorageAdapterLog[]): string[]
     const state = hexToNumber(sliceHex(staticData, 1, 2));
     if (state !== IDLE_STATE) continue;
 
-    const traits = hexToBigInt(sliceHex(staticData, 14, 19));
+    // traits (uint40) at bytes 8..13 in the current layout:
+    // affinity(1) state(1) progression(6) traits(5) budIndex(1) stats(8) metrics(10).
+    const traits = hexToBigInt(sliceHex(staticData, 8, 13));
     codes.push(unpackTraits(traits));
   }
 

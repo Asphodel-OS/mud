@@ -22,20 +22,21 @@ function mkSetRecord(tableId: Hex, id: bigint, staticData: Hex): StorageAdapterL
   } as unknown as StorageAdapterLog;
 }
 
-// TaruchiCore: owner address @0 (20), index u32 @20 (4)
+// TaruchiCore: index u32 @0 (4), owner address @4 (20)
 function coreLog(id: bigint, owner: Hex, index: number): StorageAdapterLog {
-  return mkSetRecord(CORE, id, concatHex([owner, numberToHex(index, { size: 4 })]));
+  return mkSetRecord(CORE, id, concatHex([numberToHex(index, { size: 4 }), owner]));
 }
-// TaruchiStatus: affinity u8 @0, state u8 @1, then 34 trailing bytes
+// TaruchiStatus: affinity u8 @0, state u8 @1, remaining fields occupy bytes @2..32
 function statusLog(id: bigint, state: number): StorageAdapterLog {
   return mkSetRecord(
     STATUS,
     id,
-    concatHex([numberToHex(0, { size: 1 }), numberToHex(state, { size: 1 }), numberToHex(0n, { size: 34 })]),
+    concatHex([numberToHex(0, { size: 1 }), numberToHex(state, { size: 1 }), numberToHex(0n, { size: 30 })]),
   );
 }
-// Duel ENROLL SetRecord: aIdx u32 @0, bIdx u32 @4, bracket u8 @8, status u8 @9, specs u256 @10
+// Duel ENROLL SetRecord: aIdx u32 @0, bIdx u32 @4, bracket u8 @8, status u8 @9, specs u48 @10
 // (resolve is a status splice we don't watch — we trigger off TourneyResult).
+// specs is the LAST field, so B3 (u256→u48) doesn't shift the offsets we read (a/b/bracket).
 function duelEnrollLog(id: bigint, a: number, b: number): StorageAdapterLog {
   return mkSetRecord(
     DUEL,
@@ -45,18 +46,18 @@ function duelEnrollLog(id: bigint, a: number, b: number): StorageAdapterLog {
       numberToHex(b, { size: 4 }),
       numberToHex(1, { size: 1 }), // bracket
       numberToHex(1, { size: 1 }), // status = ACTIVE
-      numberToHex(0n, { size: 32 }), // specs
+      numberToHex(0n, { size: 6 }), // specs (u48)
     ]),
   );
 }
-// Tourney enroll: players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+// Tourney enroll: players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57 (B3: specs u256→u192)
 function tourneyEnrollLog(id: bigint, bracket: number, packedPlayers: bigint): StorageAdapterLog {
   return mkSetRecord(
     TOURNEY,
     id,
     concatHex([
       numberToHex(packedPlayers, { size: 32 }),
-      numberToHex(0n, { size: 32 }),
+      numberToHex(0n, { size: 24 }), // specs (u192)
       numberToHex(bracket, { size: 1 }),
       numberToHex(1, { size: 1 }),
     ]),

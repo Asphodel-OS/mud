@@ -164,9 +164,8 @@ export function createLeaderboardCache(
       sql`SELECT id::text AS id, placements::text AS placements, time::int AS time FROM ${sql(`${schema}.app__tourney_result`)}`,
       sql`SELECT id::text AS id, "index"::int AS index, '0x' || encode(owner, 'hex') AS owner FROM ${sql(`${schema}.app__taruchi_core`)}`,
       sql`
-        SELECT id::text AS id, affinity::int AS affinity, state::int AS state, level::int AS level,
-          xp::int AS xp, training_points::int AS "trainingPoints", bud_index::int AS "budIndex",
-          traits::text AS traits, stats::text AS stats
+        SELECT id::text AS id, affinity::int AS affinity, state::int AS state, progression::text AS progression,
+          bud_index::int AS "budIndex", traits::text AS traits, stats::text AS stats
         FROM ${sql(`${schema}.app__taruchi_status`)}
       `,
       sql`SELECT id::text AS id, '0x' || encode(name, 'hex') AS name FROM ${sql(`${schema}.app__taruchi_name`)}`,
@@ -191,17 +190,22 @@ export function createLeaderboardCache(
       time: Number(r.time),
     }));
     const cores = coreRows.map((r) => ({ id: BigInt(r.id), owner: r.owner as string, index: Number(r.index) }));
-    const statuses: TaruchiStatusRow[] = statusRows.map((r) => ({
-      id: BigInt(r.id),
-      state: Number(r.state),
-      level: Number(r.level),
-      xp: Number(r.xp),
-      trainingPoints: Number(r.trainingPoints),
-      affinity: Number(r.affinity),
-      budIndex: Number(r.budIndex),
-      traits: BigInt(r.traits),
-      stats: BigInt(r.stats),
-    }));
+    const statuses: TaruchiStatusRow[] = statusRows.map((r) => {
+      // progression is a uint48 packing level | trainingPoints<<8 | xp<<16 (game2 LibProgression);
+      // 3 columns (level/xp/training_points) were collapsed into one to fit the table's field budget.
+      const prog = BigInt(r.progression);
+      return {
+        id: BigInt(r.id),
+        state: Number(r.state),
+        level: Number(prog & 0xffn),
+        xp: Number((prog >> 16n) & 0xffffffffn),
+        trainingPoints: Number((prog >> 8n) & 0xffn),
+        affinity: Number(r.affinity),
+        budIndex: Number(r.budIndex),
+        traits: BigInt(r.traits),
+        stats: BigInt(r.stats),
+      };
+    });
     const names = nameRows.map((r) => ({ id: BigInt(r.id), name: r.name as string }));
 
     const aggregate = buildAggregate({

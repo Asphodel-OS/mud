@@ -56,17 +56,18 @@ const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: 
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
 
 // --- static field offsets (verified against the codegen decodeStatic) ---
-// TaruchiCore : owner address @0 (20), index u32 @20 (4)
-const CORE_OWNER_OFFSET = 0;
-const CORE_INDEX_OFFSET = 20;
+// TaruchiCore : index u32 @0 (4), owner address @4 (20) — `index` was moved ahead of `owner`
+const CORE_INDEX_OFFSET = 0;
+const CORE_OWNER_OFFSET = 4;
 // TaruchiStatus: affinity u8 @0, state u8 @1, ...
 const STATUS_STATE_OFFSET = 1;
 // Duel : playerAIndex u32 @0, playerBIndex u32 @4, bracket u8 @8, status u8 @9
 const DUEL_A_OFFSET = 0;
 const DUEL_B_OFFSET = 4;
-// Tourney : players u256 @0, specs u256 @32, bracket u8 @64, status u8 @65
+// Tourney : players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57
+// (specs shrank u256→u192 in the gas-opt B3 change → bracket/status moved -8 bytes)
 const TOURNEY_PLAYERS_OFFSET = 0;
-const TOURNEY_BRACKET_OFFSET = 64;
+const TOURNEY_BRACKET_OFFSET = 56;
 
 /** Read a fixed-length address field as a lowercase 0x-hex string. */
 function readAddress(staticData: Hex, offset: number): string {

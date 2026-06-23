@@ -22,9 +22,9 @@ function mkSetRecord(tableId: Hex, id: bigint, staticData: Hex): StorageAdapterL
   } as unknown as StorageAdapterLog;
 }
 
-// TaruchiCore: owner address @0 (20), index u32 @20 (4)
+// TaruchiCore: index u32 @0 (4), owner address @4 (20)
 function coreLog(id: bigint, owner: Hex, index: number): StorageAdapterLog {
-  return mkSetRecord(CORE, id, concatHex([owner, numberToHex(index, { size: 4 })]));
+  return mkSetRecord(CORE, id, concatHex([numberToHex(index, { size: 4 }), owner]));
 }
 // TaruchiStatus: affinity u8 @0, state u8 @1, then 34 trailing bytes
 function statusLog(id: bigint, state: number): StorageAdapterLog {

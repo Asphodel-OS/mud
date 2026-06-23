@@ -2,7 +2,14 @@ import { describe, it, expect } from "vitest";
 import { concatHex, numberToHex, type Hex } from "viem";
 import { resourceToHex } from "@latticexyz/common";
 import type { StorageAdapterLog } from "@latticexyz/store-sync";
-import { emptyCaches, extractNotifEvents, unpackIndices } from "./notificationEventProjector";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  emptyCaches,
+  extractNotifEvents,
+  filterToSubscribed,
+  unpackIndices,
+  type NotifEvent,
+} from "./notificationEventProjector";
 
 const CORE = resourceToHex({ type: "table", namespace: "app", name: "TaruchiCore" });
 const STATUS = resourceToHex({ type: "table", namespace: "app", name: "TaruchiStatus" });
@@ -170,5 +177,82 @@ describe("extractNotifEvents — FESTIVAL", () => {
     c.ownerByIndex.set(10, OWNER_A);
     extractNotifEvents([tourneyEnrollLog(6000n, 2, packPlayers(10))], c, 1); // bracket 2 = Veteran
     expect(extractNotifEvents([tourneyResultLog(6000n)], c, 2)).toEqual([]);
+  });
+});
+
+// Minimal stub of the supabase-js builder chain filterToSubscribed uses:
+//   from("push_subscriptions").select(cols).in("wallet", wallets) -> {data,error}
+// Records the wallet list passed to `.in` so we can assert the batched, deduped query.
+type SubQueryResult = Promise<{ data: unknown[] | null; error: { message: string } | null }>;
+
+function fakeSupabase(
+  rows: unknown[],
+  opts: { error?: { message: string } } = {},
+): { client: SupabaseClient; calls: { wallets?: readonly string[] } } {
+  const calls: { wallets?: readonly string[] } = {};
+  const builder = {
+    select: (): { in: (col: string, wallets: readonly string[]) => SubQueryResult } => ({
+      in: (_col: string, wallets: readonly string[]): SubQueryResult => {
+        calls.wallets = wallets;
+        return Promise.resolve(opts.error ? { data: null, error: opts.error } : { data: rows, error: null });
+      },
+    }),
+  };
+  const client = { from: (): typeof builder => builder } as unknown as SupabaseClient;
+  return { client, calls };
+}
+
+const evMint = (w: Hex): NotifEvent => ({ type: "mint", recipient_wallet: w, taruchi_id: "1" });
+
+describe("filterToSubscribed — source-side opt-in gate", () => {
+  it("keeps an event when the recipient is subscribed for that type", async () => {
+    const { client } = fakeSupabase([{ wallet: OWNER_A, type_mint: true, type_duel: false, type_festival: false }]);
+    expect(await filterToSubscribed(client, [evMint(OWNER_A)])).toEqual([evMint(OWNER_A)]);
+  });
+
+  it("drops an event when the recipient has no subscription row", async () => {
+    const { client } = fakeSupabase([]);
+    expect(await filterToSubscribed(client, [evMint(OWNER_A)])).toEqual([]);
+  });
+
+  it("drops an event when the wallet is subscribed but that TYPE is off", async () => {
+    const { client } = fakeSupabase([{ wallet: OWNER_A, type_mint: false, type_duel: true, type_festival: false }]);
+    expect(await filterToSubscribed(client, [evMint(OWNER_A)])).toEqual([]);
+  });
+
+  it("treats a wallet as subscribed if ANY device row enables the type", async () => {
+    const { client } = fakeSupabase([
+      { wallet: OWNER_A, type_mint: false, type_duel: false, type_festival: false }, // device 1: off
+      { wallet: OWNER_A, type_mint: true, type_duel: false, type_festival: false }, // device 2: on
+    ]);
+    expect(await filterToSubscribed(client, [evMint(OWNER_A)])).toEqual([evMint(OWNER_A)]);
+  });
+
+  it("filters a mixed batch to only subscribed recipients, with one deduped query", async () => {
+    const { client, calls } = fakeSupabase([
+      { wallet: OWNER_A, type_mint: true, type_duel: true, type_festival: false },
+    ]);
+    const events: NotifEvent[] = [
+      { type: "duel", recipient_wallet: OWNER_A, taruchi_id: "9" },
+      { type: "duel", recipient_wallet: OWNER_B, taruchi_id: "9" }, // B not subscribed
+      { type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" },
+    ];
+    expect(await filterToSubscribed(client, events)).toEqual([
+      { type: "duel", recipient_wallet: OWNER_A, taruchi_id: "9" },
+      { type: "mint", recipient_wallet: OWNER_A, taruchi_id: "1" },
+    ]);
+    // A appears twice in events but is queried once; one batched IN query.
+    expect(calls.wallets).toEqual([OWNER_A, OWNER_B]);
+  });
+
+  it("returns empty without querying when there are no events", async () => {
+    const { client, calls } = fakeSupabase([]);
+    expect(await filterToSubscribed(client, [])).toEqual([]);
+    expect(calls.wallets).toBeUndefined();
+  });
+
+  it("throws (fail-closed) when the subscription read errors", async () => {
+    const { client } = fakeSupabase([], { error: { message: "db down" } });
+    await expect(filterToSubscribed(client, [evMint(OWNER_A)])).rejects.toThrow(/push_subscriptions/);
   });
 });

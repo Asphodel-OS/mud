@@ -1,14 +1,8 @@
 name: End-to-end tests
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "docs/**"
-  pull_request:
-    paths-ignore:
-      - "docs/**"
+  # auto-triggers removed for the Asphodel fork — upstream MUD CI is not run here.
+  workflow_dispatch:
 
 jobs:
   main:

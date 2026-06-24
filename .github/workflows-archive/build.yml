@@ -4,7 +4,9 @@ name: Build
 # Note: this workflow does not trigger on pushes to main,
 # because the release workflow includes a build+verify step.
 on:
-  pull_request:
+  # auto-triggers removed for the Asphodel fork — upstream MUD CI is not run here.
+  # Restore `pull_request:` (see git history) to re-enable.
+  workflow_dispatch:
 
 env:
   NODE_OPTIONS: "--max-old-space-size=4096"

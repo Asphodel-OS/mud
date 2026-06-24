@@ -67,6 +67,10 @@ RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm turbo run build --filter=@lattic
 FROM base AS store-indexer
 ARG GIT_SHA=unknown
 ENV GIT_SHA=${GIT_SHA}
+ARG VERSION=dev
+ENV VERSION=${VERSION}
+ARG BUILD_DATE=unknown
+ENV BUILD_DATE=${BUILD_DATE}
 WORKDIR /app
 COPY --from=builder /app .
 WORKDIR /app/packages/store-indexer

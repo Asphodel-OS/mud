@@ -11,6 +11,7 @@ import { queryLogs } from "./queryLogs";
 import { recordToLog } from "./recordToLog";
 import { debug, error } from "../debug";
 import { logger } from "../logger";
+import { versionInfo } from "../version";
 import { createBenchmark } from "@latticexyz/common";
 import { compress } from "../koa-middleware/compress";
 import type { LeaderboardCache } from "./aggregateCache";
@@ -149,6 +150,19 @@ export function apiRoutes(
   const router = new Router();
   const requestBuckets = new Map<string, RateLimitBucket>();
   const claimantBuckets = new Map<string, RateLimitBucket>();
+
+  // Build metadata of the running image so operators can confirm which version
+  // is live. Ungated; rides the existing ALB /api/* listener pattern (no iac
+  // change). Mirrors keryx's /admin/version contract: { version, commit, build_date }.
+  router.get("/api/version", (ctx) => {
+    ctx.status = 200;
+    ctx.set("Content-Type", "application/json");
+    ctx.body = JSON.stringify({
+      version: versionInfo.version,
+      commit: versionInfo.commit,
+      build_date: versionInfo.buildDate,
+    });
+  });
 
   // Server-side aggregated leaderboard (trainers + per-taruchi + ascended).
   // 503 until the first cache build succeeds — never serve an empty board as valid.

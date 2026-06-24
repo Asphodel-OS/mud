@@ -1,11 +1,8 @@
 name: Publish to npm
 
 on:
-  push:
-    branches:
-      - "main"
-    paths-ignore:
-      - "docs/**"
+  # auto-triggers removed for the Asphodel fork — upstream MUD npm publish is not run here.
+  workflow_dispatch:
 
 # Ensure only one workflow/job is publishing to npm at a time
 concurrency: publish-to-npm

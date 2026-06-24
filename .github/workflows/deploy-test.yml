@@ -1,0 +1,104 @@
+name: deploy test
+
+# Manual deploy of the mud indexer + frontend images to the test ECR, then a
+# forced ECS redeploy of both taru services. Two triggers, no auto-deploy:
+#   1. "Run workflow" button (workflow_dispatch) in the Actions tab — any branch.
+#   2. Add the `deploy-test` label to a PR — the run shows as a check on the PR.
+# AWS auth is OIDC; the role lives in iac (api/cicd.tf, aws_iam_role.taru_deploy_test)
+# and its ARN is the TARU_DEPLOY_TEST_ROLE_ARN repo variable. The workflow_dispatch
+# button only appears once this file is on the repo's default branch.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPO: 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/test/mud-indexer
+  CLUSTER: taru-test-ecs-mud-indexer
+
+jobs:
+  deploy-test:
+    name: deploy test
+    # Manual dispatch, or the `deploy-test` label added to a PR (ignore every
+    # other label).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'deploy-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: taru-deploy-test
+      cancel-in-progress: false
+    steps:
+      # On a label event github.sha is the PR merge commit; deploy the PR's actual
+      # head instead. On dispatch there's no PR, so fall back to github.sha.
+      # fetch-depth: 0 so the version patch (first-parent commit count) is correct;
+      # a shallow checkout has no history and the count would be wrong.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: compute version
+        id: ver
+        run: |
+          base=$(sed -n 's/.*"baseVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' version.json)
+          vjc=$(git log -1 --format=%H -- version.json)
+          if [ -n "$vjc" ]; then
+            patch=$(git rev-list --count --first-parent "$vjc"..HEAD 2>/dev/null || echo 0)
+          else
+            patch=0
+          fi
+          {
+            echo "version=${base:-0.0}.${patch:-0}"
+            echo "git_sha=$(git rev-parse --short HEAD)"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+          echo "computed version ${base:-0.0}.${patch:-0}"
+
+      - name: configure aws credentials (test)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TARU_DEPLOY_TEST_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # One image (the store-indexer stage) backs both services — tag it for the
+      # indexer and the frontend and push both. The version/commit/build_date are
+      # baked in via build-args (Dockerfile ARG -> ENV -> process.env).
+      - name: build + push image to ECR
+        run: |
+          docker build --target store-indexer \
+            --build-arg VERSION="${{ steps.ver.outputs.version }}" \
+            --build-arg GIT_SHA="${{ steps.ver.outputs.git_sha }}" \
+            --build-arg BUILD_DATE="${{ steps.ver.outputs.build_date }}" \
+            -t "$ECR_REPO:indexer-latest" \
+            -t "$ECR_REPO:frontend-latest" \
+            .
+          docker push "$ECR_REPO:indexer-latest"
+          docker push "$ECR_REPO:frontend-latest"
+
+      - name: force new ECS deployment (indexer + frontend)
+        run: |
+          for svc in taru-test-svc-mud-indexer taru-test-svc-mud-indexer-frontend; do
+            aws ecs update-service \
+              --region "$AWS_REGION" \
+              --cluster "$CLUSTER" \
+              --service "$svc" \
+              --force-new-deployment >/dev/null
+          done
+
+      - name: wait for services stable
+        run: |
+          aws ecs wait services-stable \
+            --region "$AWS_REGION" \
+            --cluster "$CLUSTER" \
+            --services taru-test-svc-mud-indexer taru-test-svc-mud-indexer-frontend

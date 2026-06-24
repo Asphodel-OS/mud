@@ -25,7 +25,7 @@ import { createSupabasePushAdapter } from "../postgres/supabasePush";
 import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
 import { createNotificationEventProjector } from "../postgres/notificationEventProjector";
 import { logger, flushLogs } from "../logger";
-import packageJson from "../../package.json";
+import { versionInfo } from "../version";
 
 const env = parseEnv(
   z.intersection(
@@ -52,8 +52,9 @@ const env = parseEnv(
 );
 
 logger.info("starting postgres-decoded-indexer", {
-  version: packageJson.version,
-  commit: process.env.GIT_SHA ?? "unknown",
+  version: versionInfo.version,
+  commit: versionInfo.commit,
+  build_date: versionInfo.buildDate,
   node: process.version,
 });
 

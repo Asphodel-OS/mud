@@ -1,11 +1,8 @@
 name: PR
 
 on:
-  pull_request_target:
-    types:
-      - opened
-      - edited
-      - synchronize
+  # auto-triggers removed for the Asphodel fork — upstream MUD CI is not run here.
+  workflow_dispatch:
 
 jobs:
   main:

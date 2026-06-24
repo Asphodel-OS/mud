@@ -1,6 +1,6 @@
 import { PgDatabase, QueryResultHKT, pgSchema, varchar } from "drizzle-orm/pg-core";
 import { gt, sql } from "drizzle-orm";
-import { Client, getAddress } from "viem";
+import { Client, getAddress, hexToBytes, type Hex } from "viem";
 import { getBlock } from "viem/actions";
 import { getStoredBlockHash } from "./blockCache";
 import { restoreFromRewindLog } from "./rewindLog";
@@ -115,21 +115,24 @@ async function rollbackReferralRewardProjection(
 
       if (storeAddresses.length === 0) return;
 
-      const addressFilter = storeAddresses.map((address) => `decode('${address.slice(2)}', 'hex')`).join(", ");
-      const recordsResult = await tx.execute(
-        sql.raw(`
-          SELECT
-            '0x' || encode(key_bytes, 'hex') AS key_bytes,
-            '0x' || encode(static_data, 'hex') AS static_data,
-            block_number::text AS block_number,
-            log_index::int AS log_index
-          FROM "${mudSchemaName}"."records"
-          WHERE address IN (${addressFilter})
-            AND table_id = decode('${REFERRAL_REWARDS_TABLE_ID.slice(2)}', 'hex')
-            AND is_deleted IS DISTINCT FROM true
-            AND static_data IS NOT NULL
-        `),
+      // Bind addresses + table id as bytea params (matches the parameterized projection path).
+      // Only the schema-qualified table identifier stays raw, since identifiers cannot be bound.
+      const addressList = sql.join(
+        storeAddresses.map((address) => sql`${hexToBytes(address as Hex)}`),
+        sql`, `,
       );
+      const recordsResult = await tx.execute(sql`
+        SELECT
+          '0x' || encode(key_bytes, 'hex') AS key_bytes,
+          '0x' || encode(static_data, 'hex') AS static_data,
+          block_number::text AS block_number,
+          log_index::int AS log_index
+        FROM ${sql.raw(`"${mudSchemaName}"."records"`)}
+        WHERE address IN (${addressList})
+          AND table_id = ${hexToBytes(REFERRAL_REWARDS_TABLE_ID)}
+          AND is_deleted IS DISTINCT FROM true
+          AND static_data IS NOT NULL
+      `);
       const rows = ((recordsResult as Record<string, unknown>).rows ?? recordsResult) as RawReferralRewardRow[];
 
       for (const row of rows) {

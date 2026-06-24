@@ -1,19 +1,28 @@
 import { PgDatabase, QueryResultHKT, pgSchema, varchar } from "drizzle-orm/pg-core";
 import { gt, sql } from "drizzle-orm";
-import { Client } from "viem";
+import { Client, getAddress } from "viem";
 import { getBlock } from "viem/actions";
 import { getStoredBlockHash } from "./blockCache";
 import { restoreFromRewindLog } from "./rewindLog";
 import { blockCacheTable, rewindLogTable } from "./reorgTables";
-import { tables as mudTables } from "@latticexyz/store-sync/postgres";
+import { tables as mudTables, transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { isNotNull } from "@latticexyz/common/utils";
 import { logger } from "../logger";
+import { REFERRAL_REWARDS_TABLE_ID } from "./referralRewardsProjection";
 
 const log = logger.child({ component: "reorg" });
+const mudSchemaName = transformSchemaName("mud");
 
 const schemata = pgSchema("information_schema").table("schemata", {
   schemaName: varchar("schema_name", { length: 64 }),
 });
+
+type RawReferralRewardRow = {
+  key_bytes?: string;
+  static_data?: string | null;
+  block_number?: string;
+  log_index?: number;
+};
 
 export async function findCommonAncestor(
   db: PgDatabase<QueryResultHKT>,
@@ -48,8 +57,10 @@ export async function rollbackToBlock(
   const entries = await restoreFromRewindLog(db, targetBlock);
   log.info("restored raw record snapshots", { count: entries.length, targetBlock });
 
+  let decodedSchemaNames: string[] = [];
   if (opts?.decoded !== false) {
-    await deleteStaleDecodedRows(db, targetBlock);
+    decodedSchemaNames = await deleteStaleDecodedRows(db, targetBlock);
+    await rollbackReferralRewardProjection(db, targetBlock, decodedSchemaNames);
   }
 
   await db.delete(rewindLogTable).where(gt(rewindLogTable.blockNumber, targetBlock)).execute();
@@ -59,13 +70,13 @@ export async function rollbackToBlock(
   log.info("rollback complete", { targetBlock });
 }
 
-async function deleteStaleDecodedRows(db: PgDatabase<QueryResultHKT>, targetBlock: bigint): Promise<void> {
+async function deleteStaleDecodedRows(db: PgDatabase<QueryResultHKT>, targetBlock: bigint): Promise<string[]> {
   const schemaNames = (await db.select({ schemaName: schemata.schemaName }).from(schemata).execute())
     .map((row) => row.schemaName)
     .filter(isNotNull)
     .filter((name) => /(^|__)0x[0-9a-f]{40}($|__)/i.test(name));
 
-  if (schemaNames.length === 0) return;
+  if (schemaNames.length === 0) return [];
 
   for (const schemaName of schemaNames) {
     const tablesResult = await db.execute(
@@ -83,4 +94,90 @@ async function deleteStaleDecodedRows(db: PgDatabase<QueryResultHKT>, targetBloc
       log.info("cleaned decoded table", { schema: schemaName, table: tableName });
     }
   }
+
+  return schemaNames;
+}
+
+async function rollbackReferralRewardProjection(
+  db: PgDatabase<QueryResultHKT>,
+  targetBlock: bigint,
+  schemaNames: readonly string[],
+): Promise<void> {
+  try {
+    await db.execute(
+      sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_events" WHERE block_number > ${targetBlock}`),
+    );
+    await db.execute(sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_state"`));
+
+    const storeAddresses = schemaNames.map(addressFromSchemaName).filter(isNotNull);
+    if (storeAddresses.length === 0) return;
+
+    const addressFilter = storeAddresses.map((address) => `decode('${address.slice(2)}', 'hex')`).join(", ");
+    const recordsResult = await db.execute(
+      sql.raw(`
+        SELECT
+          '0x' || encode(key_bytes, 'hex') AS key_bytes,
+          '0x' || encode(static_data, 'hex') AS static_data,
+          block_number::text AS block_number,
+          log_index::int AS log_index
+        FROM "${mudSchemaName}"."records"
+        WHERE address IN (${addressFilter})
+          AND table_id = decode('${REFERRAL_REWARDS_TABLE_ID.slice(2)}', 'hex')
+          AND is_deleted IS DISTINCT FROM true
+          AND static_data IS NOT NULL
+      `),
+    );
+    const rows = ((recordsResult as Record<string, unknown>).rows ?? recordsResult) as RawReferralRewardRow[];
+
+    for (const row of rows) {
+      const referrer = referrerFromKeyBytes(row.key_bytes);
+      const claimable = uint256FromHex(row.static_data);
+      if (!referrer || claimable === null || claimable === 0n) continue;
+
+      await db.execute(
+        sql.raw(`
+          INSERT INTO "${mudSchemaName}"."referral_reward_state"
+            (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
+          VALUES (
+            '${referrer}',
+            ${claimable.toString()},
+            ${BigInt(row.block_number ?? "0").toString()},
+            ${Number(row.log_index ?? 0)}
+          )
+          ON CONFLICT (referrer) DO UPDATE SET
+            claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
+            updated_block_number = EXCLUDED.updated_block_number,
+            updated_log_index = EXCLUDED.updated_log_index
+        `),
+      );
+    }
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "42P01" || code === "3F000") return;
+    throw error;
+  }
+}
+
+function addressFromSchemaName(schemaName: string): string | null {
+  const match = schemaName.match(/0x[0-9a-f]{40}/i);
+  if (!match) return null;
+  try {
+    return getAddress(match[0]).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function referrerFromKeyBytes(keyBytes: string | undefined): string | null {
+  if (!keyBytes || keyBytes.length < 66) return null;
+  try {
+    return getAddress(`0x${keyBytes.slice(-40)}`).toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function uint256FromHex(data: string | null | undefined): bigint | null {
+  if (!data || data.length < 66) return null;
+  return BigInt(data.slice(0, 66));
 }

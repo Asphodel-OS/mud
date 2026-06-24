@@ -50,7 +50,11 @@ jobs:
         run: |
           base=$(sed -n 's/.*"baseVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' version.json)
           vjc=$(git log -1 --format=%H -- version.json)
-          patch=$(git rev-list --count --first-parent "$vjc"..HEAD 2>/dev/null || echo 0)
+          if [ -n "$vjc" ]; then
+            patch=$(git rev-list --count --first-parent "$vjc"..HEAD 2>/dev/null || echo 0)
+          else
+            patch=0
+          fi
           {
             echo "version=${base:-0.0}.${patch:-0}"
             echo "git_sha=$(git rev-parse --short HEAD)"
@@ -73,9 +77,9 @@ jobs:
       - name: build + push image to ECR
         run: |
           docker build --target store-indexer \
-            --build-arg VERSION=${{ steps.ver.outputs.version }} \
-            --build-arg GIT_SHA=${{ steps.ver.outputs.git_sha }} \
-            --build-arg BUILD_DATE=${{ steps.ver.outputs.build_date }} \
+            --build-arg VERSION="${{ steps.ver.outputs.version }}" \
+            --build-arg GIT_SHA="${{ steps.ver.outputs.git_sha }}" \
+            --build-arg BUILD_DATE="${{ steps.ver.outputs.build_date }}" \
             -t "$ECR_REPO:indexer-latest" \
             -t "$ECR_REPO:frontend-latest" \
             .

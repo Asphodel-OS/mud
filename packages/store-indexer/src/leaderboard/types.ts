@@ -18,9 +18,12 @@ export interface LeaderboardRow {
    * still surfaced on the winrate leaderboard but grouped below qualified
    * players so small-sample streaks can't take the podium. */
   qualified: boolean;
-  /** NET ONYX profit: total prize earnings minus entry fees, in 2dp ONYX.
-   * Can be negative for players whose entry costs exceed winnings. */
+  /** Combined ONYX total: gameplay net plus lifetime referral earnings, in 2dp ONYX. */
   onyxWon: number;
+  /** Gameplay-only NET ONYX profit: total prize earnings minus entry fees, in 2dp ONYX. */
+  gameOnyxWon: number;
+  /** Lifetime referral rewards earned by this wallet, in 2dp ONYX. */
+  referralOnyxEarned: number;
   /** Total entry fees paid, in 2dp ONYX. */
   onyxSpent: number;
   /**

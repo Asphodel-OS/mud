@@ -216,6 +216,39 @@ describe("buildAggregate", () => {
     expect(loser.onyxSpent).toBe(0);
   });
 
+  it("adds lifetime referral rewards to wallet ONYX without touching per-taru rows", () => {
+    const cores = [mkCore(1n, "0xAAA", 10), mkCore(2n, "0xBBB", 20)];
+    const duels = [mkDuel(100n, 1, 10, 20)];
+    const results = [mkResult(100n, 10, 20)];
+
+    const out = buildAggregate({
+      tourneys: [],
+      duels,
+      results,
+      cores,
+      statuses: [],
+      names: [],
+      protocolFeeBps: 0n,
+      festivalProtocolFeeBps: 0n,
+      jackpotBps: 0n,
+      spriteFor,
+      decodeName,
+      referralRewardsByReferrer: new Map([
+        ["0xaaa", { lifetimeEarnedOnyxWei: "1330000000000000000" }],
+        ["0xddd", { lifetimeEarnedOnyxWei: "5000000000000000000" }],
+      ]),
+    });
+
+    const walletRow = out.overall.find((r) => r.wallet === "0xaaa")!;
+    expect(walletRow.gameOnyxWon).toBe(0);
+    expect(walletRow.referralOnyxEarned).toBe(1.33);
+    expect(walletRow.onyxWon).toBe(1.33);
+    expect(out.overall.find((r) => r.wallet === "0xddd")).toBeUndefined();
+
+    const taruRow = out.byTaruchi.get("1")!;
+    expect(taruRow.onyxWon).toBe(0);
+  });
+
   it("aggregates festival diagram placements correctly (L11 placement-3 = 9 ONYX)", () => {
     // Rookie festival (bracket=4, entry=5 ONYX). Diagram placement 3 pays 9 ONYX.
     // Wallet 0x00a takes 3rd → gross 9, cost 5 entry, net +4.
@@ -244,6 +277,8 @@ describe("buildAggregate", () => {
     const row = out.overall.find((r) => r.wallet === "0x00a")!;
     expect(row.onyxSpent).toBe(5);
     expect(row.onyxWon).toBe(4); // 9 gross − 5 entry
+    expect(row.gameOnyxWon).toBe(4);
+    expect(row.referralOnyxEarned).toBe(0);
   });
 
   it("aggregates per-taru rows alongside per-wallet", () => {

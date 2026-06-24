@@ -24,6 +24,11 @@ import { ReorgError } from "../postgres/ReorgError";
 import { createSupabasePushAdapter } from "../postgres/supabasePush";
 import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
 import { createNotificationEventProjector } from "../postgres/notificationEventProjector";
+import {
+  createReferralRewardProjectionAdapter,
+  ensureReferralRewardProjectionTables,
+  resetReferralRewardStateFromStoreRecords,
+} from "../postgres/referralRewardsProjection";
 import { logger, flushLogs } from "../logger";
 import { versionInfo } from "../version";
 
@@ -75,15 +80,18 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 const clientOptions = await getClientOptions(env);
 const publicClient = getRpcClient(clientOptions);
 const chainId = await getChainId(publicClient);
-const database = drizzle(
-  postgres(env.DATABASE_URL, {
-    prepare: false,
-    onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
-  }),
-);
+const sql = postgres(env.DATABASE_URL, {
+  prepare: false,
+  onnotice: (notice) => logger.debug(notice.message, { component: "postgres", code: notice.code }),
+});
+const database = drizzle(sql);
 
 let isCaughtUp = false;
 let healthcheckStarted = false;
+await ensureReferralRewardProjectionTables(sql);
+if (env.STORE_ADDRESS) {
+  await resetReferralRewardStateFromStoreRecords(sql, [env.STORE_ADDRESS.toLowerCase()]);
+}
 
 // Supabase push funnel: a storage-adapter decorator (same shape as the SQS
 // reveal hook) that, after each block's durable write lands, runs its projectors
@@ -124,9 +132,11 @@ async function startSync(): Promise<void> {
   const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
 
   const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);
+  const referralRewardProjection = createReferralRewardProjectionAdapter(sql);
+  const referralRewardAdapter = referralRewardProjection.wrap(loggingAdapter);
   // Supabase push funnel wraps the write so its projectors see each block's
   // logs after the durable write lands; pass-through when disabled.
-  const supabaseAdapter = supabasePush.wrap(loggingAdapter);
+  const supabaseAdapter = supabasePush.wrap(referralRewardAdapter);
   const sqsAdapter = env.SQS_QUEUE_URL ? createRevealHookAdapter(supabaseAdapter, env.SQS_QUEUE_URL) : supabaseAdapter;
 
   const finalAdapter = env.REORG_SAFE

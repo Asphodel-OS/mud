@@ -66,6 +66,8 @@ export interface BuildAggregateInput {
   spriteFor: (core: CoreLike, status: StatusLike | undefined) => string;
   /** Decode bytes32 name to display string. Injected so tests don't pull viem. */
   decodeName: (name: string) => string;
+  /** Wallet-lifetime referral earnings in wei, keyed by lowercase wallet. */
+  referralRewardsByReferrer?: ReadonlyMap<string, { lifetimeEarnedOnyxWei: string }>;
 }
 
 /** How we accumulate into a row before sorting. Wei-precision ONYX is kept
@@ -116,6 +118,7 @@ export function buildAggregate(input: BuildAggregateInput): LeaderboardAggregate
     jackpotBps,
     spriteFor,
     decodeName,
+    referralRewardsByReferrer = new Map(),
   } = input;
 
   const recordCount = tourneys.length + duels.length + results.length;
@@ -318,15 +321,15 @@ export function buildAggregate(input: BuildAggregateInput): LeaderboardAggregate
     }
   }
 
-  // Finalize wei → 2dp ONYX at the boundary. `onyxWon` exposes the NET
-  // (earnings minus entry fees); can be negative for losing players. Raw
-  // earnings are discarded — if a caller ever needs gross separately, add
-  // an explicit field here.
+  // Finalize wei → 2dp ONYX at the boundary. `gameOnyxWon` is gameplay NET
+  // (earnings minus entry fees); `onyxWon` adds wallet-level referral earnings.
   const overall: LeaderboardRow[] = [];
   const byWallet = new Map<string, LeaderboardRow>();
   for (const [wallet, a] of acc) {
+    const referralLifetimeWei = BigInt(referralRewardsByReferrer.get(wallet)?.lifetimeEarnedOnyxWei ?? "0");
     const onyxSpent = weiTo2dpOnyx(a.onyxSpentWei);
-    const onyxNet = weiTo2dpOnyx(a.onyxEarnedWei - a.onyxSpentWei);
+    const gameOnyxWon = weiTo2dpOnyx(a.onyxEarnedWei - a.onyxSpentWei);
+    const referralOnyxEarned = weiTo2dpOnyx(referralLifetimeWei);
     const row: LeaderboardRow = {
       wallet: a.wallet,
       wins: a.wins,
@@ -336,7 +339,9 @@ export function buildAggregate(input: BuildAggregateInput): LeaderboardAggregate
       bestPlacement: a.bestPlacement,
       winrate: rawWinrate(a.wins, a.losses),
       qualified: isQualified(a.wins, a.losses),
-      onyxWon: onyxNet,
+      onyxWon: weiTo2dpOnyx(a.onyxEarnedWei - a.onyxSpentWei + referralLifetimeWei),
+      gameOnyxWon,
+      referralOnyxEarned,
       onyxSpent,
       imageUrl: a.imageUrl,
     };

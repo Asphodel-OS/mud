@@ -51,19 +51,26 @@ function normalizeAddress(value: string | null | undefined): string | null {
   return value.toLowerCase();
 }
 
-function referrerFromKeyTuple(keyTuple: readonly Hex[] | undefined): string | null {
-  const key = keyTuple?.[0];
-  if (!key || key.length !== UINT256_HEX_LENGTH) return null;
+export function referrerFromKeyBytes(keyBytes: string | null | undefined): string | null {
+  if (!keyBytes || keyBytes.length !== UINT256_HEX_LENGTH) return null;
   try {
-    return getAddress(`0x${key.slice(-40)}`).toLowerCase();
+    return getAddress(`0x${keyBytes.slice(-40)}`).toLowerCase();
   } catch {
     return null;
   }
 }
 
-function uint256FromHex(data: Hex | undefined): bigint | null {
+function referrerFromKeyTuple(keyTuple: readonly Hex[] | undefined): string | null {
+  return referrerFromKeyBytes(keyTuple?.[0]);
+}
+
+export function uint256FromHex(data: string | null | undefined): bigint | null {
   if (!data || data.length < UINT256_HEX_LENGTH) return null;
-  return BigInt(data.slice(0, UINT256_HEX_LENGTH));
+  try {
+    return BigInt(data.slice(0, UINT256_HEX_LENGTH));
+  } catch {
+    return null;
+  }
 }
 
 function claimableFromLog(log: StorageAdapterLog): bigint | null {
@@ -205,29 +212,31 @@ export async function resetReferralRewardStateFromStoreRecords(
   sql: Sql,
   storeAddresses: readonly string[],
 ): Promise<void> {
-  await sql`DELETE FROM ${sql(`${mudSchemaName}.referral_reward_state`)}`;
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM ${tx(`${mudSchemaName}.referral_reward_state`)}`;
 
-  for (const storeAddress of storeAddresses) {
-    const normalizedStoreAddress = normalizeAddress(storeAddress) as Hex | null;
-    if (!normalizedStoreAddress) continue;
+    for (const storeAddress of storeAddresses) {
+      const normalizedStoreAddress = normalizeAddress(storeAddress) as Hex | null;
+      if (!normalizedStoreAddress) continue;
 
-    const rows = await fetchRawReferralRewardRows(sql, normalizedStoreAddress);
-    for (const row of rows) {
-      const referrer = referrerFromKeyTuple([row.keyBytes as Hex]);
-      const claimable = uint256FromHex(row.staticData as Hex | undefined);
-      if (!referrer || claimable === null || claimable === 0n) continue;
+      const rows = await fetchRawReferralRewardRows(tx, normalizedStoreAddress);
+      for (const row of rows) {
+        const referrer = referrerFromKeyBytes(row.keyBytes);
+        const claimable = uint256FromHex(row.staticData);
+        if (!referrer || claimable === null || claimable === 0n) continue;
 
-      await sql`
-        INSERT INTO ${sql(`${mudSchemaName}.referral_reward_state`)}
-          (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
-        VALUES (${referrer}, ${claimable.toString()}, ${row.blockNumber}, ${row.logIndex})
-        ON CONFLICT (referrer) DO UPDATE SET
-          claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
-          updated_block_number = EXCLUDED.updated_block_number,
-          updated_log_index = EXCLUDED.updated_log_index
-      `;
+        await tx`
+          INSERT INTO ${tx(`${mudSchemaName}.referral_reward_state`)}
+            (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
+          VALUES (${referrer}, ${claimable.toString()}, ${row.blockNumber}, ${row.logIndex})
+          ON CONFLICT (referrer) DO UPDATE SET
+            claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
+            updated_block_number = EXCLUDED.updated_block_number,
+            updated_log_index = EXCLUDED.updated_log_index
+        `;
+      }
     }
-  }
+  });
 }
 
 async function readProjectionState(sql: Sql): Promise<Map<string, bigint>> {
@@ -240,7 +249,8 @@ async function readProjectionState(sql: Sql): Promise<Map<string, bigint>> {
 
 async function applyReferralRewardProjection(sql: Sql, block: StorageAdapterBlock): Promise<void> {
   const touched = new Set<string>();
-  for (const entry of block.logs) {
+  const lastTouchedLogIndexByReferrer = new Map<string, number>();
+  block.logs.forEach((entry, ordinal) => {
     if (
       entry.args.tableId === REFERRAL_REWARDS_TABLE_ID &&
       (entry.eventName === "Store_SetRecord" ||
@@ -248,9 +258,12 @@ async function applyReferralRewardProjection(sql: Sql, block: StorageAdapterBloc
         entry.eventName === "Store_DeleteRecord")
     ) {
       const referrer = referrerFromKeyTuple(entry.args.keyTuple);
-      if (referrer) touched.add(referrer);
+      if (referrer) {
+        touched.add(referrer);
+        lastTouchedLogIndexByReferrer.set(referrer, Number(entry.logIndex ?? ordinal));
+      }
     }
-  }
+  });
   if (touched.size === 0) return;
 
   const initialState = await readProjectionState(sql);
@@ -280,7 +293,7 @@ async function applyReferralRewardProjection(sql: Sql, block: StorageAdapterBloc
           ${referrer},
           ${(nextClaimableByReferrer.get(referrer) ?? 0n).toString()},
           ${block.blockNumber.toString()},
-          ${block.logs.length}
+          ${lastTouchedLogIndexByReferrer.get(referrer) ?? 0}
         )
         ON CONFLICT (referrer) DO UPDATE SET
           claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,

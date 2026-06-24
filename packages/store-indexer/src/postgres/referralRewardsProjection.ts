@@ -1,3 +1,16 @@
+// Referral rewards projection.
+//
+// DURABILITY INVARIANT: `lifetimeEarnedOnyxWei` is derived ONLY from the
+// append-only `referral_reward_events` ledger. Claimable resets to 0 on claim,
+// so lifetime is NOT reconstructable from `mud.records` / on-chain state: it
+// exists solely in the events table. `resetReferralRewardStateFromStoreRecords`
+// rebuilds claimable from records on startup but never touches events.
+// Therefore: the events table must be wiped/restored as a unit with
+// `mud.records` (a partial restore that drops events while keeping records
+// silently undercounts lifetime, and can leave claimable > lifetime), and any
+// rebuild must fully replay from the world deploy block so every accrual is
+// re-observed. `warnIfClaimableExceedsLifetime` is the cheap startup tripwire
+// for the corruption case. See README "Referral rewards projection".
 import type { Sql } from "postgres";
 import type { StorageAdapter, StorageAdapterBlock, StorageAdapterLog } from "@latticexyz/store-sync";
 import { transformSchemaName } from "@latticexyz/store-sync/postgres";
@@ -185,6 +198,35 @@ export async function fetchReferralRewardProjectionRows(sql: Sql): Promise<Refer
     if (code === "42P01" || code === "3F000") return [];
     throw error;
   }
+}
+
+/// Returns rows whose claimable exceeds lifetime: only possible when the
+/// `referral_reward_events` ledger has lost accruals that `mud.records` still
+/// reflects (see DURABILITY INVARIANT above). Malformed numerics are ignored.
+export function findClaimableExceedingLifetime(rows: ReferralRewardProjectionRow[]): ReferralRewardProjectionRow[] {
+  return rows.filter((row) => {
+    try {
+      return BigInt(row.claimableOnyxWei) > BigInt(row.lifetimeEarnedOnyxWei);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/// Startup tripwire: warn (do not throw) if any referrer's claimable exceeds
+/// lifetime, signalling a truncated/out-of-sync events ledger. Reuses
+/// `fetchReferralRewardProjectionRows`, which already no-ops on a missing table.
+export async function warnIfClaimableExceedsLifetime(sql: Sql): Promise<void> {
+  const offending = findClaimableExceedingLifetime(await fetchReferralRewardProjectionRows(sql));
+  if (offending.length === 0) return;
+  log.warn("referral lifetime ledger below claimable: events table may be truncated or out of sync", {
+    affectedReferrers: offending.length,
+    sample: offending.slice(0, 5).map((row) => ({
+      referrer: row.referrer,
+      claimableOnyxWei: row.claimableOnyxWei,
+      lifetimeEarnedOnyxWei: row.lifetimeEarnedOnyxWei,
+    })),
+  });
 }
 
 async function fetchRawReferralRewardRows(sql: Sql, storeAddress: Hex): Promise<RawReferralRewardRecord[]> {

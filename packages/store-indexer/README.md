@@ -74,3 +74,17 @@ The signer public address must match the game2 contracts `ASCENSION_RECORD_SIGNE
 | Variable          | Description              | Default      |
 | ----------------- | ------------------------ | ------------ |
 | `SQLITE_FILENAME` | SQLite database filename | `indexer.db` |
+
+## Referral rewards projection (Asphodel)
+
+The decoded indexer maintains two referral tables in the `mud` schema:
+
+- `referral_reward_state`: current **claimable** ONYX per referrer. Rebuilt from `mud.records` on every startup (`resetReferralRewardStateFromStoreRecords`).
+- `referral_reward_events`: append-only ledger of every positive claimable delta. The **only** source of `lifetimeEarnedOnyxWei`.
+
+**Durability invariant:** claimable resets to 0 on claim, so lifetime cannot be reconstructed from `mud.records` or on-chain state: it lives solely in `referral_reward_events`. Operational rules:
+
+- Wipe/restore `referral_reward_events` only as a unit with `mud.records`. A partial restore that drops events while keeping records silently undercounts lifetime and can leave `claimable > lifetime`.
+- Any rebuild of the projection must fully replay from the world deploy block so every accrual is re-observed.
+
+On startup the indexer runs `warnIfClaimableExceedsLifetime`, which logs a `referral-rewards` warning (it does not throw) if any referrer's claimable exceeds lifetime: the signal that the events ledger is truncated or out of sync.

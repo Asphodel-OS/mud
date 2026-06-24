@@ -4,7 +4,9 @@ import type { StorageAdapterLog } from "@latticexyz/store-sync";
 import {
   buildReferralRewardsByReferrer,
   collectReferralRewardDeltas,
+  findClaimableExceedingLifetime,
   REFERRAL_REWARDS_TABLE_ID,
+  type ReferralRewardProjectionRow,
 } from "./referralRewardsProjection";
 
 vi.mock("@latticexyz/store-sync/postgres", (): { transformSchemaName: (name: string) => string } => ({
@@ -99,5 +101,34 @@ describe("buildReferralRewardsByReferrer", () => {
       lifetimeEarnedOnyxWei: "1330",
     });
     expect(rewards.size).toBe(1);
+  });
+});
+
+describe("findClaimableExceedingLifetime", () => {
+  const rows = (entries: Array<[string, string, string]>): ReferralRewardProjectionRow[] =>
+    entries.map(([referrer, claimableOnyxWei, lifetimeEarnedOnyxWei]) => ({
+      referrer,
+      claimableOnyxWei,
+      lifetimeEarnedOnyxWei,
+    }));
+
+  it("flags only referrers whose claimable exceeds lifetime", () => {
+    const offending = findClaimableExceedingLifetime(
+      rows([
+        [REFERRER, "500", "330"], // claimable > lifetime → corrupted ledger
+        [OTHER_REFERRER, "330", "330"], // equal → healthy
+        ["0x000000000000000000000000000000000000dEaD", "0", "1000"], // claimed out → healthy
+      ]),
+    );
+
+    expect(offending.map((row) => row.referrer)).toEqual([REFERRER]);
+  });
+
+  it("returns nothing when every row is healthy", () => {
+    expect(findClaimableExceedingLifetime(rows([[REFERRER, "100", "100"]]))).toEqual([]);
+  });
+
+  it("ignores rows with malformed numerics", () => {
+    expect(findClaimableExceedingLifetime(rows([[REFERRER, "oops", "0"]]))).toEqual([]);
   });
 });

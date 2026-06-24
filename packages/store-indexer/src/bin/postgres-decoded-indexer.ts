@@ -28,6 +28,7 @@ import {
   createReferralRewardProjectionAdapter,
   ensureReferralRewardProjectionTables,
   resetReferralRewardStateFromStoreRecords,
+  warnIfClaimableExceedsLifetime,
 } from "../postgres/referralRewardsProjection";
 import { logger, flushLogs } from "../logger";
 import { versionInfo } from "../version";
@@ -92,6 +93,8 @@ await ensureReferralRewardProjectionTables(sql);
 if (env.STORE_ADDRESS) {
   await resetReferralRewardStateFromStoreRecords(sql, [env.STORE_ADDRESS.toLowerCase()]);
 }
+// Tripwire for a truncated/out-of-sync lifetime ledger (see referralRewardsProjection.ts).
+await warnIfClaimableExceedsLifetime(sql);
 
 // Supabase push funnel: a storage-adapter decorator (same shape as the SQS
 // reveal hook) that, after each block's durable write lands, runs its projectors

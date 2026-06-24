@@ -107,10 +107,11 @@ async function rollbackReferralRewardProjection(
     const storeAddresses = schemaNames.map(addressFromSchemaName).filter(isNotNull);
 
     await db.transaction(async (tx) => {
-      await tx.execute(
-        sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_events" WHERE block_number > ${targetBlock}`),
-      );
-      await tx.execute(sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_state"`));
+      await tx.execute(sql`
+        DELETE FROM ${sql.raw(`"${mudSchemaName}"."referral_reward_events"`)}
+        WHERE block_number > ${targetBlock.toString()}
+      `);
+      await tx.execute(sql`DELETE FROM ${sql.raw(`"${mudSchemaName}"."referral_reward_state"`)}`);
 
       if (storeAddresses.length === 0) return;
 
@@ -136,22 +137,20 @@ async function rollbackReferralRewardProjection(
         const claimable = uint256FromHex(row.static_data);
         if (!referrer || claimable === null || claimable === 0n) continue;
 
-        await tx.execute(
-          sql.raw(`
-            INSERT INTO "${mudSchemaName}"."referral_reward_state"
-              (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
-            VALUES (
-              '${referrer}',
-              ${claimable.toString()},
-              ${BigInt(row.block_number ?? "0").toString()},
-              ${Number(row.log_index ?? 0)}
-            )
-            ON CONFLICT (referrer) DO UPDATE SET
-              claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
-              updated_block_number = EXCLUDED.updated_block_number,
-              updated_log_index = EXCLUDED.updated_log_index
-          `),
-        );
+        await tx.execute(sql`
+          INSERT INTO ${sql.raw(`"${mudSchemaName}"."referral_reward_state"`)}
+            (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
+          VALUES (
+            ${referrer},
+            ${claimable.toString()},
+            ${BigInt(row.block_number ?? "0").toString()},
+            ${Number(row.log_index ?? 0)}
+          )
+          ON CONFLICT (referrer) DO UPDATE SET
+            claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
+            updated_block_number = EXCLUDED.updated_block_number,
+            updated_log_index = EXCLUDED.updated_log_index
+        `);
       }
     });
   } catch (error) {

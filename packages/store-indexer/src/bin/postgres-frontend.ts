@@ -20,7 +20,7 @@ import { logsLive, closeLiveStreams } from "../koa-middleware/logsLive";
 import { createBlockLogsStream } from "../postgres/createBlockLogsStream";
 import { createLeaderboardCache } from "../postgres/aggregateCache";
 import { logger, flushLogs } from "../logger";
-import packageJson from "../../package.json";
+import { versionInfo } from "../version";
 
 const env = parseEnv(
   z.intersection(
@@ -128,7 +128,13 @@ server.use(
 );
 
 const httpServer = server.listen({ host: env.HOST, port: env.PORT });
-logger.info("starting postgres-frontend", { version: packageJson.version, host: env.HOST, port: env.PORT });
+logger.info("starting postgres-frontend", {
+  version: versionInfo.version,
+  commit: versionInfo.commit,
+  build_date: versionInfo.buildDate,
+  host: env.HOST,
+  port: env.PORT,
+});
 
 let shuttingDown = false;
 async function shutdown(signal: NodeJS.Signals): Promise<void> {

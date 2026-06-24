@@ -8,7 +8,7 @@ import { blockCacheTable, rewindLogTable } from "./reorgTables";
 import { tables as mudTables, transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { isNotNull } from "@latticexyz/common/utils";
 import { logger } from "../logger";
-import { REFERRAL_REWARDS_TABLE_ID } from "./referralRewardsProjection";
+import { REFERRAL_REWARDS_TABLE_ID, referrerFromKeyBytes, uint256FromHex } from "./referralRewardsProjection";
 
 const log = logger.child({ component: "reorg" });
 const mudSchemaName = transformSchemaName("mud");
@@ -104,53 +104,56 @@ async function rollbackReferralRewardProjection(
   schemaNames: readonly string[],
 ): Promise<void> {
   try {
-    await db.execute(
-      sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_events" WHERE block_number > ${targetBlock}`),
-    );
-    await db.execute(sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_state"`));
-
     const storeAddresses = schemaNames.map(addressFromSchemaName).filter(isNotNull);
-    if (storeAddresses.length === 0) return;
 
-    const addressFilter = storeAddresses.map((address) => `decode('${address.slice(2)}', 'hex')`).join(", ");
-    const recordsResult = await db.execute(
-      sql.raw(`
-        SELECT
-          '0x' || encode(key_bytes, 'hex') AS key_bytes,
-          '0x' || encode(static_data, 'hex') AS static_data,
-          block_number::text AS block_number,
-          log_index::int AS log_index
-        FROM "${mudSchemaName}"."records"
-        WHERE address IN (${addressFilter})
-          AND table_id = decode('${REFERRAL_REWARDS_TABLE_ID.slice(2)}', 'hex')
-          AND is_deleted IS DISTINCT FROM true
-          AND static_data IS NOT NULL
-      `),
-    );
-    const rows = ((recordsResult as Record<string, unknown>).rows ?? recordsResult) as RawReferralRewardRow[];
+    await db.transaction(async (tx) => {
+      await tx.execute(
+        sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_events" WHERE block_number > ${targetBlock}`),
+      );
+      await tx.execute(sql.raw(`DELETE FROM "${mudSchemaName}"."referral_reward_state"`));
 
-    for (const row of rows) {
-      const referrer = referrerFromKeyBytes(row.key_bytes);
-      const claimable = uint256FromHex(row.static_data);
-      if (!referrer || claimable === null || claimable === 0n) continue;
+      if (storeAddresses.length === 0) return;
 
-      await db.execute(
+      const addressFilter = storeAddresses.map((address) => `decode('${address.slice(2)}', 'hex')`).join(", ");
+      const recordsResult = await tx.execute(
         sql.raw(`
-          INSERT INTO "${mudSchemaName}"."referral_reward_state"
-            (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
-          VALUES (
-            '${referrer}',
-            ${claimable.toString()},
-            ${BigInt(row.block_number ?? "0").toString()},
-            ${Number(row.log_index ?? 0)}
-          )
-          ON CONFLICT (referrer) DO UPDATE SET
-            claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
-            updated_block_number = EXCLUDED.updated_block_number,
-            updated_log_index = EXCLUDED.updated_log_index
+          SELECT
+            '0x' || encode(key_bytes, 'hex') AS key_bytes,
+            '0x' || encode(static_data, 'hex') AS static_data,
+            block_number::text AS block_number,
+            log_index::int AS log_index
+          FROM "${mudSchemaName}"."records"
+          WHERE address IN (${addressFilter})
+            AND table_id = decode('${REFERRAL_REWARDS_TABLE_ID.slice(2)}', 'hex')
+            AND is_deleted IS DISTINCT FROM true
+            AND static_data IS NOT NULL
         `),
       );
-    }
+      const rows = ((recordsResult as Record<string, unknown>).rows ?? recordsResult) as RawReferralRewardRow[];
+
+      for (const row of rows) {
+        const referrer = referrerFromKeyBytes(row.key_bytes);
+        const claimable = uint256FromHex(row.static_data);
+        if (!referrer || claimable === null || claimable === 0n) continue;
+
+        await tx.execute(
+          sql.raw(`
+            INSERT INTO "${mudSchemaName}"."referral_reward_state"
+              (referrer, claimable_onyx_wei, updated_block_number, updated_log_index)
+            VALUES (
+              '${referrer}',
+              ${claimable.toString()},
+              ${BigInt(row.block_number ?? "0").toString()},
+              ${Number(row.log_index ?? 0)}
+            )
+            ON CONFLICT (referrer) DO UPDATE SET
+              claimable_onyx_wei = EXCLUDED.claimable_onyx_wei,
+              updated_block_number = EXCLUDED.updated_block_number,
+              updated_log_index = EXCLUDED.updated_log_index
+          `),
+        );
+      }
+    });
   } catch (error) {
     const code = (error as { code?: string }).code;
     if (code === "42P01" || code === "3F000") return;
@@ -166,18 +169,4 @@ function addressFromSchemaName(schemaName: string): string | null {
   } catch {
     return null;
   }
-}
-
-function referrerFromKeyBytes(keyBytes: string | undefined): string | null {
-  if (!keyBytes || keyBytes.length < 66) return null;
-  try {
-    return getAddress(`0x${keyBytes.slice(-40)}`).toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
-function uint256FromHex(data: string | null | undefined): bigint | null {
-  if (!data || data.length < 66) return null;
-  return BigInt(data.slice(0, 66));
 }

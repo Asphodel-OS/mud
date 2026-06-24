@@ -182,7 +182,7 @@ export async function fetchReferralRewardProjectionRows(sql: Sql): Promise<Refer
     `;
   } catch (error) {
     const code = (error as { code?: string }).code;
-    if (code === "42P01") return [];
+    if (code === "42P01" || code === "3F000") return [];
     throw error;
   }
 }

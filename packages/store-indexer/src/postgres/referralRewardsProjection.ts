@@ -20,7 +20,8 @@ import { logger } from "../logger";
 const log = logger.child({ component: "referral-rewards" });
 const mudSchemaName = transformSchemaName("mud");
 
-export const REFERRAL_REWARDS_TABLE_ID = "0x74626170700000000000000000000000526566657272616c5265776172647300" as Hex;
+// app/AccountStatus table; referral claim credit is its static field 0 (uint32 milli-ONYX).
+export const ACCOUNT_STATUS_TABLE_ID = "0x746261707000000000000000000000004163636f756e74537461747573000000" as Hex;
 
 export type IndexedReferralRewards = {
   claimableOnyxWei: string;
@@ -77,10 +78,15 @@ function referrerFromKeyTuple(keyTuple: readonly Hex[] | undefined): string | nu
   return referrerFromKeyBytes(keyTuple?.[0]);
 }
 
-export function uint256FromHex(data: string | null | undefined): bigint | null {
-  if (!data || data.length < UINT256_HEX_LENGTH) return null;
+// claimCredit is AccountStatus static field 0 (uint32 milli-ONYX) → first 4 bytes of static data.
+// Returned in wei so the projection state, events, and API stay wei.
+const CLAIM_CREDIT_HEX_LENGTH = 10; // "0x" + 8 hex (uint32)
+const CREDIT_UNIT_WEI = 10n ** 15n;
+
+export function claimCreditWeiFromStatic(data: string | null | undefined): bigint | null {
+  if (!data || data.length < CLAIM_CREDIT_HEX_LENGTH) return null;
   try {
-    return BigInt(data.slice(0, UINT256_HEX_LENGTH));
+    return BigInt(data.slice(0, CLAIM_CREDIT_HEX_LENGTH)) * CREDIT_UNIT_WEI;
   } catch {
     return null;
   }
@@ -89,12 +95,13 @@ export function uint256FromHex(data: string | null | undefined): bigint | null {
 function claimableFromLog(log: StorageAdapterLog): bigint | null {
   if (log.eventName === "Store_DeleteRecord") return 0n;
   if (log.eventName === "Store_SetRecord") {
-    return uint256FromHex(log.args.staticData as Hex | undefined);
+    return claimCreditWeiFromStatic(log.args.staticData as Hex | undefined);
   }
   if (log.eventName === "Store_SpliceStaticData") {
+    // claimCredit lives at offset 0; reserved fields splice at start > 0 and are ignored.
     const start = Number((log.args as { start?: number | bigint }).start ?? 0);
     if (start !== 0) return null;
-    return uint256FromHex((log.args as { data?: Hex }).data);
+    return claimCreditWeiFromStatic((log.args as { data?: Hex }).data);
   }
   return null;
 }
@@ -115,7 +122,7 @@ export function collectReferralRewardDeltas(
     ) {
       return;
     }
-    if (entry.args.tableId !== REFERRAL_REWARDS_TABLE_ID) return;
+    if (entry.args.tableId !== ACCOUNT_STATUS_TABLE_ID) return;
 
     const referrer = referrerFromKeyTuple(entry.args.keyTuple);
     const nextClaimable = claimableFromLog(entry);
@@ -239,7 +246,7 @@ async function fetchRawReferralRewardRows(sql: Sql, storeAddress: Hex): Promise<
         log_index::int AS "logIndex"
       FROM ${sql(`${mudSchemaName}.records`)}
       WHERE address = ${hexToBytes(storeAddress)}
-        AND table_id = ${hexToBytes(REFERRAL_REWARDS_TABLE_ID)}
+        AND table_id = ${hexToBytes(ACCOUNT_STATUS_TABLE_ID)}
         AND is_deleted IS DISTINCT FROM true
         AND static_data IS NOT NULL
     `;
@@ -264,7 +271,7 @@ export async function resetReferralRewardStateFromStoreRecords(
       const rows = await fetchRawReferralRewardRows(tx, normalizedStoreAddress);
       for (const row of rows) {
         const referrer = referrerFromKeyBytes(row.keyBytes);
-        const claimable = uint256FromHex(row.staticData);
+        const claimable = claimCreditWeiFromStatic(row.staticData);
         if (!referrer || claimable === null || claimable === 0n) continue;
 
         await tx`
@@ -294,7 +301,7 @@ async function applyReferralRewardProjection(sql: Sql, block: StorageAdapterBloc
   const lastTouchedLogIndexByReferrer = new Map<string, number>();
   block.logs.forEach((entry, ordinal) => {
     if (
-      entry.args.tableId === REFERRAL_REWARDS_TABLE_ID &&
+      entry.args.tableId === ACCOUNT_STATUS_TABLE_ID &&
       (entry.eventName === "Store_SetRecord" ||
         entry.eventName === "Store_SpliceStaticData" ||
         entry.eventName === "Store_DeleteRecord")

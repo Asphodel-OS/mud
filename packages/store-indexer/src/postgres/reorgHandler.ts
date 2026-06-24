@@ -8,7 +8,7 @@ import { blockCacheTable, rewindLogTable } from "./reorgTables";
 import { tables as mudTables, transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { isNotNull } from "@latticexyz/common/utils";
 import { logger } from "../logger";
-import { REFERRAL_REWARDS_TABLE_ID, referrerFromKeyBytes, uint256FromHex } from "./referralRewardsProjection";
+import { ACCOUNT_STATUS_TABLE_ID, referrerFromKeyBytes, claimCreditWeiFromStatic } from "./referralRewardsProjection";
 
 const log = logger.child({ component: "reorg" });
 const mudSchemaName = transformSchemaName("mud");
@@ -129,7 +129,7 @@ async function rollbackReferralRewardProjection(
           log_index::int AS log_index
         FROM ${sql.raw(`"${mudSchemaName}"."records"`)}
         WHERE address IN (${addressList})
-          AND table_id = ${hexToBytes(REFERRAL_REWARDS_TABLE_ID)}
+          AND table_id = ${hexToBytes(ACCOUNT_STATUS_TABLE_ID)}
           AND is_deleted IS DISTINCT FROM true
           AND static_data IS NOT NULL
       `);
@@ -137,7 +137,7 @@ async function rollbackReferralRewardProjection(
 
       for (const row of rows) {
         const referrer = referrerFromKeyBytes(row.key_bytes);
-        const claimable = uint256FromHex(row.static_data);
+        const claimable = claimCreditWeiFromStatic(row.static_data);
         if (!referrer || claimable === null || claimable === 0n) continue;
 
         await tx.execute(sql`

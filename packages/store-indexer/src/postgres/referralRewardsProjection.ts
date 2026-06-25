@@ -257,18 +257,38 @@ async function fetchRawReferralRewardRows(sql: Sql, storeAddress: Hex): Promise<
   }
 }
 
+async function mudRecordsTableExists(sql: Sql): Promise<boolean> {
+  const [row] = await sql<{ exists: boolean }[]>`
+    SELECT to_regclass(${projectionIdentifier("records")}) IS NOT NULL AS "exists"
+  `;
+  return row?.exists ?? false;
+}
+
 export async function resetReferralRewardStateFromStoreRecords(
   sql: Sql,
   storeAddresses: readonly string[],
 ): Promise<void> {
+  // `mud.records` is created by the MUD storage adapter, which only initializes
+  // after this runs on first boot. A missing-table read inside `sql.begin` aborts
+  // the transaction and postgres.js rethrows that error out of `begin` regardless
+  // of the local catch (its handler records the first query error and rethrows it
+  // once the callback resolves). So probe and read OUTSIDE the transaction: no-op
+  // when the table is absent (nothing to rebuild yet), and reserve `sql.begin` for
+  // the atomic DELETE+INSERT so API readers never observe an empty projection.
+  if (!(await mudRecordsTableExists(sql))) return;
+
+  const normalizedStoreAddresses = storeAddresses
+    .map((storeAddress) => normalizeAddress(storeAddress))
+    .filter((storeAddress): storeAddress is Hex => storeAddress !== null);
+
+  const recordsByStore = await Promise.all(
+    normalizedStoreAddresses.map((storeAddress) => fetchRawReferralRewardRows(sql, storeAddress)),
+  );
+
   await sql.begin(async (tx) => {
     await tx`DELETE FROM ${tx(`${mudSchemaName}.referral_reward_state`)}`;
 
-    for (const storeAddress of storeAddresses) {
-      const normalizedStoreAddress = normalizeAddress(storeAddress) as Hex | null;
-      if (!normalizedStoreAddress) continue;
-
-      const rows = await fetchRawReferralRewardRows(tx, normalizedStoreAddress);
+    for (const rows of recordsByStore) {
       for (const row of rows) {
         const referrer = referrerFromKeyBytes(row.keyBytes);
         const claimable = claimCreditWeiFromStatic(row.staticData);

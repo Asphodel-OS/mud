@@ -33,6 +33,10 @@ function cache(overrides: Partial<LeaderboardCache> = {}): LeaderboardCache {
     getTaruchi: () => null,
     getAccount: () => ({ index: 7, referrer: REFERRER, createdBlock: "12345" }),
     getReferralCount: () => 4,
+    getReferralRewards: () => ({
+      claimableOnyxWei: "330000000000000000",
+      lifetimeEarnedOnyxWei: "1330000000000000000",
+    }),
     computedAt: () => 111,
     indexedBlock: () => 222n,
     rebuildNow: async (): Promise<void> => {},
@@ -82,6 +86,7 @@ describe("apiRoutes account payloads", () => {
       wallet: WALLET,
       account: { index: 7, referrer: REFERRER, createdBlock: "12345" },
       referralCount: 4,
+      referralRewards: { claimableOnyxWei: "330000000000000000", lifetimeEarnedOnyxWei: "1330000000000000000" },
       computedAt: 111,
     });
   });
@@ -96,6 +101,7 @@ describe("apiRoutes account payloads", () => {
       roster: [],
       account: { index: 7, referrer: REFERRER, createdBlock: "12345" },
       referralCount: 4,
+      referralRewards: { claimableOnyxWei: "330000000000000000", lifetimeEarnedOnyxWei: "1330000000000000000" },
       computedAt: 111,
     });
   });

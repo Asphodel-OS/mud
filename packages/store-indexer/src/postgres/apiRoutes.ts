@@ -69,6 +69,7 @@ type AccountPayload = {
   wallet: string;
   account: ReturnType<LeaderboardCache["getAccount"]>;
   referralCount: number;
+  referralRewards: ReturnType<LeaderboardCache["getReferralRewards"]>;
   computedAt: number;
 };
 
@@ -77,6 +78,7 @@ function accountPayload(leaderboardCache: LeaderboardCache, wallet: string): Acc
     wallet: wallet.toLowerCase(),
     account: leaderboardCache.getAccount(wallet),
     referralCount: leaderboardCache.getReferralCount(wallet),
+    referralRewards: leaderboardCache.getReferralRewards(wallet),
     computedAt: leaderboardCache.computedAt(),
   };
 }
@@ -202,6 +204,7 @@ export function apiRoutes(
       roster: leaderboardCache.getRoster(wallet),
       account: leaderboardCache.getAccount(wallet),
       referralCount: leaderboardCache.getReferralCount(wallet),
+      referralRewards: leaderboardCache.getReferralRewards(wallet),
       computedAt: leaderboardCache.computedAt(),
     });
   });

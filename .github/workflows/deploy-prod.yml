@@ -24,6 +24,11 @@ env:
 jobs:
   deploy-prod:
     name: deploy prod
+    # The taru-deploy-prod IAM role trusts only the `environment:prod` OIDC
+    # subject, so the job must run in this environment for AssumeRole to succeed.
+    # The prod environment's deployment-branch policy (main only) is the primary
+    # main-only gate; the guard step below is defence in depth.
+    environment: prod
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:

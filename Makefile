@@ -41,15 +41,29 @@ indexer-dev-logs:
 db-reset:                                                
 	docker compose -f docker-compose.indexer.yml down -v
 
-ECR_REPO := 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/test/mud-indexer
+REGION        := ap-southeast-1
+ECR_HOST      := 590183983824.dkr.ecr.$(REGION).amazonaws.com
+TEST_ECR_REPO := $(ECR_HOST)/test/mud-indexer
+PROD_ECR_REPO := $(ECR_HOST)/prod/mud-indexer
 
-publish-indexer-test:
-	docker tag mud-indexer $(ECR_REPO):indexer-latest
-	docker push $(ECR_REPO):indexer-latest
+ecr-login: ## AWS ECR login
+	aws ecr get-login-password --region $(REGION) | docker login --username AWS --password-stdin $(ECR_HOST)
 
-publish-frontend-test:
-	docker tag mud-frontend $(ECR_REPO):frontend-latest
-	docker push $(ECR_REPO):frontend-latest
+publish-indexer-test: ecr-login
+	docker tag mud-indexer $(TEST_ECR_REPO):indexer-latest
+	docker push $(TEST_ECR_REPO):indexer-latest
+
+publish-frontend-test: ecr-login
+	docker tag mud-frontend $(TEST_ECR_REPO):frontend-latest
+	docker push $(TEST_ECR_REPO):frontend-latest
+
+publish-indexer-prod: ecr-login
+	docker tag mud-indexer $(PROD_ECR_REPO):indexer-latest
+	docker push $(PROD_ECR_REPO):indexer-latest
+
+publish-frontend-prod: ecr-login
+	docker tag mud-frontend $(PROD_ECR_REPO):frontend-latest
+	docker push $(PROD_ECR_REPO):frontend-latest
 
 vendor-indexer:
 	./scripts/vendor-indexer.sh

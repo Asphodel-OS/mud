@@ -1,0 +1,103 @@
+name: deploy prod
+
+# Manual deploy of the mud indexer + frontend images to the prod ECR, then a
+# forced ECS redeploy of both taru services. Unlike deploy-test there is no
+# PR-label trigger and no auto-deploy:
+#   - "Run workflow" button (workflow_dispatch) only.
+#   - The run is rejected unless it was launched from `main` (guard step below).
+# AWS auth is OIDC; the role lives in iac (api/cicd.tf, aws_iam_role.taru_deploy_prod)
+# and its ARN is the TARU_DEPLOY_PROD_ROLE_ARN repo variable. The workflow_dispatch
+# button only appears once this file is on the repo's default branch.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPO: 590183983824.dkr.ecr.ap-southeast-1.amazonaws.com/prod/mud-indexer
+  CLUSTER: taru-prod-ecs-mud-indexer
+
+jobs:
+  deploy-prod:
+    name: deploy prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: taru-deploy-prod
+      cancel-in-progress: false
+    steps:
+      # workflow_dispatch lets the operator pick any ref; prod deploys are only
+      # allowed from main. Fail loudly rather than skip silently.
+      - name: guard - main only
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Prod deploys are only allowed from main (got ${{ github.ref }})"
+          exit 1
+
+      # fetch-depth: 0 so the version patch (first-parent commit count) is correct;
+      # a shallow checkout has no history and the count would be wrong.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: compute version
+        id: ver
+        run: |
+          base=$(sed -n 's/.*"baseVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' version.json)
+          vjc=$(git log -1 --format=%H -- version.json)
+          if [ -n "$vjc" ]; then
+            patch=$(git rev-list --count --first-parent "$vjc"..HEAD 2>/dev/null || echo 0)
+          else
+            patch=0
+          fi
+          {
+            echo "version=${base:-0.0}.${patch:-0}"
+            echo "git_sha=$(git rev-parse --short HEAD)"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+          echo "computed version ${base:-0.0}.${patch:-0}"
+
+      - name: configure aws credentials (prod)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TARU_DEPLOY_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # One image (the store-indexer stage) backs both services — tag it for the
+      # indexer and the frontend and push both. The version/commit/build_date are
+      # baked in via build-args (Dockerfile ARG -> ENV -> process.env).
+      - name: build + push image to ECR
+        run: |
+          docker build --target store-indexer \
+            --build-arg VERSION="${{ steps.ver.outputs.version }}" \
+            --build-arg GIT_SHA="${{ steps.ver.outputs.git_sha }}" \
+            --build-arg BUILD_DATE="${{ steps.ver.outputs.build_date }}" \
+            -t "$ECR_REPO:indexer-latest" \
+            -t "$ECR_REPO:frontend-latest" \
+            .
+          docker push "$ECR_REPO:indexer-latest"
+          docker push "$ECR_REPO:frontend-latest"
+
+      - name: force new ECS deployment (indexer + frontend)
+        run: |
+          for svc in taru-prod-svc-mud-indexer taru-prod-svc-mud-indexer-frontend; do
+            aws ecs update-service \
+              --region "$AWS_REGION" \
+              --cluster "$CLUSTER" \
+              --service "$svc" \
+              --force-new-deployment >/dev/null
+          done
+
+      - name: wait for services stable
+        run: |
+          aws ecs wait services-stable \
+            --region "$AWS_REGION" \
+            --cluster "$CLUSTER" \
+            --services taru-prod-svc-mud-indexer taru-prod-svc-mud-indexer-frontend

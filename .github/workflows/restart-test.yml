@@ -1,0 +1,59 @@
+name: restart test
+
+# Manual restart (force new ECS deployment) of the mud indexer + frontend taru
+# services WITHOUT rebuilding/pushing an image. New tasks re-resolve Secrets
+# Manager values at startup — both task defs reference secrets by unversioned ARN,
+# so each fresh task pulls AWSCURRENT — which is how you roll updated secret values
+# into the running services. No build, no new task-def revision: AWS docs confirm
+# force-new-deployment is sufficient after a secret changes. Caveat: the services
+# run the mutable `indexer-latest` / `frontend-latest` tags, so a restart also
+# re-pulls whatever those tags point at now, not only refreshed secrets.
+#
+# OIDC auth uses the test role (iac api/cicd.tf, aws_iam_role.taru_deploy_test),
+# which trusts the ref subject — so this job sets NO `environment:`. An environment
+# claim would change the OIDC subject and break AssumeRole. Any branch may run it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  CLUSTER: taru-test-ecs-mud-indexer
+
+jobs:
+  restart-test:
+    name: restart test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Shared with deploy-test so a restart and a deploy can't overlap on the same
+    # ECS services.
+    concurrency:
+      group: taru-deploy-test
+      cancel-in-progress: false
+    steps:
+      - name: configure aws credentials (test)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TARU_DEPLOY_TEST_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: force new ECS deployment (indexer + frontend)
+        run: |
+          for svc in taru-test-svc-mud-indexer taru-test-svc-mud-indexer-frontend; do
+            aws ecs update-service \
+              --region "$AWS_REGION" \
+              --cluster "$CLUSTER" \
+              --service "$svc" \
+              --force-new-deployment >/dev/null
+          done
+
+      - name: wait for services stable
+        run: |
+          aws ecs wait services-stable \
+            --region "$AWS_REGION" \
+            --cluster "$CLUSTER" \
+            --services taru-test-svc-mud-indexer taru-test-svc-mud-indexer-frontend

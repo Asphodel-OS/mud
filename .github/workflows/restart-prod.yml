@@ -1,0 +1,67 @@
+name: restart prod
+
+# Manual restart (force new ECS deployment) of the mud indexer + frontend taru
+# services WITHOUT rebuilding/pushing an image. New tasks re-resolve Secrets
+# Manager values at startup — both task defs reference secrets by unversioned ARN,
+# so each fresh task pulls AWSCURRENT — which is how you roll updated secret values
+# into the running services. No build, no new task-def revision: AWS docs confirm
+# force-new-deployment is sufficient after a secret changes. Caveat: the services
+# run the mutable `indexer-latest` / `frontend-latest` tags, so a restart also
+# re-pulls whatever those tags point at now, not only refreshed secrets.
+#
+# Prod restarts ONLY from main: the prod GitHub Environment's main-only branch
+# policy is the primary gate, and the guard step below is defence in depth. OIDC
+# auth uses the prod role (iac api/cicd.tf, aws_iam_role.taru_deploy_prod), which
+# trusts ONLY the `environment:prod` subject — hence `environment: prod` here.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  CLUSTER: taru-prod-ecs-mud-indexer
+
+jobs:
+  restart-prod:
+    name: restart prod
+    environment: prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: taru-deploy-prod
+      cancel-in-progress: false
+    steps:
+      # workflow_dispatch lets the operator pick any ref; prod restarts are only
+      # allowed from main. Fail loudly rather than skip silently.
+      - name: guard - main only
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Prod restarts are only allowed from main (got ${{ github.ref }})"
+          exit 1
+
+      - name: configure aws credentials (prod)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.TARU_DEPLOY_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: force new ECS deployment (indexer + frontend)
+        run: |
+          for svc in taru-prod-svc-mud-indexer taru-prod-svc-mud-indexer-frontend; do
+            aws ecs update-service \
+              --region "$AWS_REGION" \
+              --cluster "$CLUSTER" \
+              --service "$svc" \
+              --force-new-deployment >/dev/null
+          done
+
+      - name: wait for services stable
+        run: |
+          aws ecs wait services-stable \
+            --region "$AWS_REGION" \
+            --cluster "$CLUSTER" \
+            --services taru-prod-svc-mud-indexer taru-prod-svc-mud-indexer-frontend

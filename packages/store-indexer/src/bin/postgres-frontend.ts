@@ -134,6 +134,7 @@ logger.info("starting postgres-frontend", {
   build_date: versionInfo.buildDate,
   host: env.HOST,
   port: env.PORT,
+  ascension_record_signer: ascensionAttestation?.signer.address ?? "disabled",
 });
 
 let shuttingDown = false;

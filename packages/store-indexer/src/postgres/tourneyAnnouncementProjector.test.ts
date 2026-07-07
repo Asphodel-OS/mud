@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { concatHex, numberToHex, type Hex } from "viem";
 import { resourceToHex } from "@latticexyz/common";
 import type { StorageAdapterLog } from "@latticexyz/store-sync";
@@ -51,6 +51,25 @@ describe("newAnnouncements", () => {
 // --- chain-log decode (the SQS-reveal-hook posture) ---
 const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Tourney" });
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
+const DUEL_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Duel" });
+
+// The projector reads only the Duel key (identity), never its staticData —
+// placeholder value bytes are deliberate.
+function duelEnrollLog(id: bigint): StorageAdapterLog {
+  return mkSetRecord(DUEL_TABLE_ID, id, "0x00");
+}
+
+// `log` is module-private and import-bound, so the warn is only observable at
+// its sink: stdout (logger routes warn there; only error goes to stderr).
+const WARN_SNIPPET = "tourney result with no known bracket";
+function spyWarnLines(): { count: () => number } {
+  const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  return { count: () => spy.mock.calls.filter((call) => String(call[0]).includes(WARN_SNIPPET)).length };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 // Tourney value: players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57 (B3: specs u256→u192)
 function tourneyEnrollLog(id: bigint, bracket: number): StorageAdapterLog {
@@ -85,6 +104,7 @@ describe("extractFinishedFestivals", () => {
     const finished = extractFinishedFestivals(
       [tourneyEnrollLog(12345n, 5), tourneyResultLog(12345n, time)],
       new Map(),
+      new Set(),
       100,
     );
     expect(finished).toEqual([
@@ -99,10 +119,10 @@ describe("extractFinishedFestivals", () => {
   it("uses the bracket cached from a prior block's enroll write", () => {
     const map = new Map<string, number>();
     // Block N: enroll only — caches bracket, emits nothing.
-    expect(extractFinishedFestivals([tourneyEnrollLog(7n, 6)], map, 1)).toEqual([]);
+    expect(extractFinishedFestivals([tourneyEnrollLog(7n, 6)], map, new Set(), 1)).toEqual([]);
     expect(map.get("7")).toBe(6);
     // Block M: result only — resolves via the cached bracket.
-    const finished = extractFinishedFestivals([tourneyResultLog(7n, 1_700_000_000)], map, 2);
+    const finished = extractFinishedFestivals([tourneyResultLog(7n, 1_700_000_000)], map, new Set(), 2);
     expect(finished.map((t) => [t.tournament_id, t.name])).toEqual([["7", "Ascension Festival"]]);
   });
 
@@ -110,13 +130,67 @@ describe("extractFinishedFestivals", () => {
     const finished = extractFinishedFestivals(
       [tourneyEnrollLog(9n, 2), tourneyResultLog(9n, 1_700_000_000)],
       new Map(),
+      new Set(),
       3,
     );
     expect(finished).toEqual([]);
   });
 
-  it("skips a result whose enroll was never seen (unknown bracket)", () => {
-    const finished = extractFinishedFestivals([tourneyResultLog(42n, 1_700_000_000)], new Map(), 4);
+  it("warns exactly once for a result that is neither a known duel nor a known tourney", () => {
+    const warns = spyWarnLines();
+    const finished = extractFinishedFestivals([tourneyResultLog(42n, 1_700_000_000)], new Map(), new Set(), 4);
     expect(finished).toEqual([]);
+    expect(warns.count()).toBe(1);
+  });
+
+  it("keeps the festival bracket cached after its result (reorg re-mirror)", () => {
+    const warns = spyWarnLines();
+    const map = new Map<string, number>();
+    const time = 1_700_000_000;
+    const logs = [tourneyEnrollLog(600n, 5), tourneyResultLog(600n, time)];
+    expect(extractFinishedFestivals(logs, map, new Set(), 5).map((t) => t.tournament_id)).toEqual(["600"]);
+    // Reorg replays only the resolve block: the cached bracket must still name it.
+    const replay = extractFinishedFestivals([tourneyResultLog(600n, time)], map, new Set(), 5);
+    expect(replay.map((t) => t.tournament_id)).toEqual(["600"]);
+    expect(warns.count()).toBe(0);
+  });
+});
+
+describe("extractFinishedFestivals — duel results (duels share the TourneyResult table)", () => {
+  it("skips a duel result silently and consumes its id (same block)", () => {
+    const warns = spyWarnLines();
+    const duelIds = new Set<string>();
+    const finished = extractFinishedFestivals(
+      [duelEnrollLog(500n), tourneyResultLog(500n, 1_700_000_000)],
+      new Map(),
+      duelIds,
+      10,
+    );
+    expect(finished).toEqual([]);
+    expect(warns.count()).toBe(0);
+    expect(duelIds.has("500")).toBe(false);
+  });
+
+  it("caches the duel id from a prior block's enroll and consumes it at the result", () => {
+    const warns = spyWarnLines();
+    const duelIds = new Set<string>();
+    expect(extractFinishedFestivals([duelEnrollLog(501n)], new Map(), duelIds, 11)).toEqual([]);
+    expect(duelIds.has("501")).toBe(true);
+    expect(extractFinishedFestivals([tourneyResultLog(501n, 1_700_000_000)], new Map(), duelIds, 12)).toEqual([]);
+    expect(warns.count()).toBe(0);
+    expect(duelIds.has("501")).toBe(false);
+  });
+
+  it("announces only the festival when a duel and a festival resolve in the same block", () => {
+    const warns = spyWarnLines();
+    const time = 1_700_000_000;
+    const finished = extractFinishedFestivals(
+      [duelEnrollLog(700n), tourneyEnrollLog(701n, 4), tourneyResultLog(700n, time), tourneyResultLog(701n, time)],
+      new Map(),
+      new Set(),
+      13,
+    );
+    expect(finished.map((t) => [t.tournament_id, t.name])).toEqual([["701", "Festival of Buds"]]);
+    expect(warns.count()).toBe(0);
   });
 });

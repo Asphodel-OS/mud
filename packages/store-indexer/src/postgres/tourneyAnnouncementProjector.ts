@@ -45,6 +45,12 @@ export function newAnnouncements(finished: FinishedTournament[], existingIds: Se
 // instead of "tb". Getting this type wrong yields a tableId that never matches.
 const TOURNEY_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Tourney" });
 const TOURNEY_RESULT_TABLE_ID = resourceToHex({ type: "offchainTable", namespace: "app", name: "TourneyResult" });
+// Duels resolve by writing TourneyResult too (LibDuel.finishDuel), sharing its
+// key space. A duel's bracket lives in the onchain Duel table and is always
+// non-festival (LibDuel.verifyDuelBracketLevel reverts festival/NULL), so
+// identity alone is enough to filter duel results — never decode Duel
+// staticData here. Same posture as notificationEventProjector's duel branch.
+const DUEL_TABLE_ID = resourceToHex({ type: "table", namespace: "app", name: "Duel" });
 
 // --- static field layouts (from the codegen valueSchemas) ---
 // Tourney value: (players u256 @0, specs u192 @32, bracket u8 @56, status u8 @57)
@@ -60,27 +66,39 @@ const TOURNEY_RESULT_TIME_OFFSET = 32;
  *  - Each `TourneyResult` SetRecord (written at resolve) gives id (key) + time
  *    (static field). Look up the bracket; if it's a festival, emit it.
  *
- * `bracketById` persists across blocks (enroll precedes resolve) and is mutated
- * here. Pure & side-effect-free w.r.t. Supabase, so it's unit-testable.
+ * `bracketById` and `knownDuelIds` persist across blocks (enroll precedes
+ * resolve) and are mutated here. Pure & side-effect-free w.r.t. Supabase, so
+ * it's unit-testable.
  */
 export function extractFinishedFestivals(
   logs: readonly StorageAdapterLog[],
   bracketById: Map<string, number>,
+  knownDuelIds: Set<string>,
   blockNumber: number,
 ): FinishedTournament[] {
-  // 1) learn brackets from Tourney enroll writes
+  // 1) learn brackets from Tourney enroll writes, and duel ids from Duel enroll
+  //    writes (the only Duel SetRecord — resolve is a status splice we don't see)
   for (const rec of setRecordsFor(logs, TOURNEY_TABLE_ID)) {
     bracketById.set(keyToId(rec), readStaticUint(rec.staticData, TOURNEY_BRACKET_OFFSET, 1));
+  }
+  for (const rec of setRecordsFor(logs, DUEL_TABLE_ID)) {
+    knownDuelIds.add(keyToId(rec));
   }
 
   // 2) emit for festivals whose result was just written
   const finished: FinishedTournament[] = [];
   for (const rec of setRecordsFor(logs, TOURNEY_RESULT_TABLE_ID)) {
     const id = keyToId(rec);
+    // A known duel resolving: nothing to announce. Consume the id (self-prune
+    // keeps the Set bounded to in-flight duels at ~1 duel resolve per block)
+    // and skip before the bracket lookup so the warn below stays a genuine
+    // anomaly signal instead of firing per duel.
+    if (knownDuelIds.delete(id)) continue;
     const bracket = bracketById.get(id);
     if (bracket === undefined) {
-      // Enroll write not seen (indexer started after it) — can't name it. With
-      // START_BLOCK at the world deploy this never happens.
+      // Festival enroll write not seen (indexer started after it) — can't name
+      // it. Duel results are filtered above. With START_BLOCK at the world
+      // deploy this never happens.
       log.warn("tourney result with no known bracket; skipping", { id, block: blockNumber });
       continue;
     }
@@ -159,11 +177,17 @@ export function createTourneyAnnouncementProjector(): Projector {
   // (enroll precedes resolve) and never pruned: a reorg may replay only the
   // resolve block, so we must keep brackets for already-enrolled tourneys.
   const bracketById = new Map<string, number>();
+  // Duel ids learned from Duel enroll writes, consumed when their TourneyResult
+  // lands. Deliberately the opposite retention to bracketById (and to the
+  // sibling's never-pruned duelPlayersById): duels emit no announcement, so a
+  // resolved duel's id is dead weight, and a reorg replaying a pruned duel
+  // resolve costs at most one warn before skipping correctly.
+  const knownDuelIds = new Set<string>();
 
   return {
     name: "tourney-announcement",
     onBlock: async (logs: readonly StorageAdapterLog[], ctx: ProjectorContext): Promise<void> => {
-      const finished = extractFinishedFestivals(logs, bracketById, ctx.blockNumber);
+      const finished = extractFinishedFestivals(logs, bracketById, knownDuelIds, ctx.blockNumber);
       if (finished.length === 0) return;
 
       const announce = ctx.isCaughtUp();

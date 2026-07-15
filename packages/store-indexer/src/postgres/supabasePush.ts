@@ -1,12 +1,9 @@
-import type { Sql } from "postgres";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { type Hex, hexToBigInt, hexToBytes, hexToNumber, sliceHex } from "viem";
+import { type Hex, hexToBigInt, hexToNumber, sliceHex } from "viem";
 import { StorageAdapter, StorageAdapterBlock, StorageAdapterLog } from "@latticexyz/store-sync";
-import { transformSchemaName } from "@latticexyz/store-sync/postgres";
 import { logger } from "../logger";
 
 const log = logger.child({ component: "supabase-push" });
-const mudSchemaName = transformSchemaName("mud");
 
 /**
  * Per-block context handed to each projector.
@@ -62,47 +59,6 @@ export function keyToId(rec: SetRecord): string {
 /** Read a static uint field `[offset, offset+len)` from a record's staticData. */
 export function readStaticUint(staticData: Hex, offset: number, len: number): number {
   return hexToNumber(sliceHex(staticData, offset, offset + len));
-}
-
-/**
- * Probe for `mud.records` BEFORE querying it inside a transaction: the storage
- * adapter only creates the table after first boot, and an errored query inside
- * `sql.begin` aborts the transaction and rethrows out of `begin` regardless of
- * a local catch (see referralRewardsProjection's identical constraint) — so
- * fetchSetRecords' missing-table catch cannot save a transactional caller.
- */
-export async function mudRecordsTableExists(sql: Sql): Promise<boolean> {
-  const [row] = await sql<{ exists: boolean }[]>`
-    SELECT to_regclass(${`"${mudSchemaName}"."records"`}) IS NOT NULL AS "exists"
-  `;
-  return row?.exists ?? false;
-}
-
-/**
- * Hydration-path counterpart to `setRecordsFor`: instead of decoding from a
- * block's logs, reads the current row per `(address, table_id)` straight out of
- * `mud.records`. This is the state the storage adapter has already rolled back
- * to the common ancestor before a reorg restart, so it's safe to seed
- * in-process caches from it on boot. Mirrors `fetchRawReferralRewardRows` in
- * `referralRewardsProjection.ts`, including its missing-table fail-open.
- */
-export async function fetchSetRecords(sql: Sql, storeAddress: Hex, tableId: Hex): Promise<SetRecord[]> {
-  try {
-    const rows = await sql<{ keyBytes: Hex; staticData: Hex }[]>`
-      SELECT '0x' || encode(key_bytes, 'hex') AS "keyBytes", '0x' || encode(static_data, 'hex') AS "staticData"
-      FROM ${sql(`${mudSchemaName}.records`)}
-      WHERE address = ${hexToBytes(storeAddress)}
-        AND table_id = ${hexToBytes(tableId)}
-        AND is_deleted IS DISTINCT FROM true
-        AND static_data IS NOT NULL
-    `;
-    // All hydrated tables key on a single uint256, so key_bytes IS keyTuple[0].
-    return rows.map((row) => ({ keyTuple: [row.keyBytes], staticData: row.staticData }));
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    if (code === "42P01" || code === "3F000") return [];
-    throw error;
-  }
 }
 
 export interface SupabasePushAdapter {

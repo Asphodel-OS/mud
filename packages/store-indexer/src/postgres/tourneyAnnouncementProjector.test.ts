@@ -1,12 +1,9 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { concatHex, numberToHex, type Hex } from "viem";
 import { resourceToHex } from "@latticexyz/common";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import type { StorageAdapterLog } from "@latticexyz/store-sync";
-import type { ProjectorContext } from "./supabasePush";
 import {
   FESTIVAL_NAMES,
-  createTourneyAnnouncementProjector,
   extractFinishedFestivals,
   formatAnnouncement,
   newAnnouncements,
@@ -194,76 +191,6 @@ describe("extractFinishedFestivals — duel results (duels share the TourneyResu
       13,
     );
     expect(finished.map((t) => [t.tournament_id, t.name])).toEqual([["701", "Festival of Buds"]]);
-    expect(warns.count()).toBe(0);
-  });
-});
-
-// --- createTourneyAnnouncementProjector seed param (end-to-end onBlock) ---
-
-// Builder-chain stub for the two calls publishToSupabase makes on
-// "tournament_results": the unconditional pre-upsert existing-ids read
-// (.select().in()) and the upsert itself. "announcements" is never touched
-// because these tests use isCaughtUp: () => false.
-function fakeTourneySupabase(): { client: SupabaseClient; upsertRows: FinishedTournament[] } {
-  const upsertRows: FinishedTournament[] = [];
-  const resultsBuilder = {
-    select: () => ({
-      in: () => Promise.resolve({ data: [], error: null }),
-    }),
-    upsert: (rows: FinishedTournament[]): Promise<{ error: null }> => {
-      upsertRows.push(...rows);
-      return Promise.resolve({ error: null });
-    },
-  };
-  const client = {
-    from: (table: string) => {
-      if (table === "tournament_results") return resultsBuilder;
-      throw new Error(`unexpected table: ${table}`);
-    },
-  } as unknown as SupabaseClient;
-  return { client, upsertRows };
-}
-
-function fakeCtx(client: SupabaseClient, blockNumber: number): ProjectorContext {
-  return { supabase: client, blockNumber, isCaughtUp: () => false };
-}
-
-describe("createTourneyAnnouncementProjector — seed param", () => {
-  it("seeded bracketById: a festival result post-restart resolves to the announcement/mirror without a bracket warn", async () => {
-    const warns = spyWarnLines();
-    const { client, upsertRows } = fakeTourneySupabase();
-    const p = createTourneyAnnouncementProjector({ bracketById: new Map([["600", 5]]) });
-    const time = 1_700_000_000;
-    await p.onBlock([tourneyResultLog(600n, time)], fakeCtx(client, 20));
-    expect(upsertRows.map((r) => [r.tournament_id, r.name])).toEqual([["600", "Festival of Flowers"]]);
-    expect(warns.count()).toBe(0);
-  });
-
-  it("seeded knownDuelIds: a duel result is consumed with no announcement and no bracket warn", async () => {
-    const warns = spyWarnLines();
-    const { client, upsertRows } = fakeTourneySupabase();
-    const p = createTourneyAnnouncementProjector({ knownDuelIds: new Set(["500"]) });
-    await p.onBlock([tourneyResultLog(500n, 1_700_000_000)], fakeCtx(client, 21));
-    expect(upsertRows).toEqual([]);
-    expect(warns.count()).toBe(0);
-  });
-
-  it("does not share seed collections with the caller", async () => {
-    const b = new Map([["600", 5]]);
-    const d = new Set(["500"]);
-    const p = createTourneyAnnouncementProjector({ bracketById: b, knownDuelIds: d });
-    b.set("600", 2);
-    b.set("999", 4);
-    d.clear();
-
-    const warns = spyWarnLines();
-    const { client: client600, upsertRows: rows600 } = fakeTourneySupabase();
-    await p.onBlock([tourneyResultLog(600n, 1_700_000_000)], fakeCtx(client600, 22));
-    expect(rows600.map((r) => [r.tournament_id, r.name])).toEqual([["600", "Festival of Flowers"]]);
-
-    const { client: client500, upsertRows: rows500 } = fakeTourneySupabase();
-    await p.onBlock([tourneyResultLog(500n, 1_700_000_000)], fakeCtx(client500, 23));
-    expect(rows500).toEqual([]);
     expect(warns.count()).toBe(0);
   });
 });

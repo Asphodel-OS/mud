@@ -13,7 +13,7 @@ import { sentry } from "../koa-middleware/sentry";
 import { healthcheck } from "../koa-middleware/healthcheck";
 import { helloWorld } from "../koa-middleware/helloWorld";
 import { getClientOptions } from "./getClientOptions";
-import { Block, type Hex } from "viem";
+import { Block } from "viem";
 import { getChainId } from "viem/actions";
 import { getRpcClient } from "@latticexyz/block-logs-stream";
 import { createRevealHookAdapter } from "../sqs-reveal-hook";
@@ -23,11 +23,7 @@ import { storeBlockHash } from "../postgres/blockCache";
 import { ReorgError } from "../postgres/ReorgError";
 import { createSupabasePushAdapter } from "../postgres/supabasePush";
 import { createTourneyAnnouncementProjector } from "../postgres/tourneyAnnouncementProjector";
-import {
-  createNotificationEventProjector,
-  emptyCaches,
-  hydrateNotifCachesFromDb,
-} from "../postgres/notificationEventProjector";
+import { createNotificationEventProjector } from "../postgres/notificationEventProjector";
 import {
   createReferralRewardProjectionAdapter,
   ensureReferralRewardProjectionTables,
@@ -100,6 +96,21 @@ if (env.STORE_ADDRESS) {
 // Tripwire for a truncated/out-of-sync lifetime ledger (see referralRewardsProjection.ts).
 await warnIfClaimableExceedsLifetime(sql);
 
+// Supabase push funnel: a storage-adapter decorator (same shape as the SQS
+// reveal hook) that, after each block's durable write lands, runs its projectors
+// against the block's logs. The tourney-announcement projector captures finished
+// festivals straight from the chain (no DB read) and mirrors them into Supabase.
+// Lives in the indexer (the writer) so it sees the raw logs and never races
+// horizontally-scaled frontend replicas. No-op unless the flag + creds are set.
+// Announcements are gated on isCaughtUp so historical catch-up doesn't spam chat.
+const supabasePush = createSupabasePushAdapter({
+  enabled: env.PUBLISH_RESULTS_TO_SUPABASE,
+  supabaseUrl: env.SUPABASE_URL,
+  serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
+  isCaughtUp: () => isCaughtUp,
+  projectors: [createTourneyAnnouncementProjector(), createNotificationEventProjector()],
+});
+
 async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Promise<bigint> {
   try {
     const chainState = await database
@@ -121,41 +132,6 @@ async function getStartBlock(configTable: (typeof mudTables)["configTable"]): Pr
 }
 
 async function startSync(): Promise<void> {
-  // Supabase push funnel: a storage-adapter decorator (same shape as the SQS
-  // reveal hook) that, after each block's durable write lands, runs its
-  // projectors against the block's logs. Built PER SYNC ATTEMPT: a reorg rolls
-  // mud.records back to the common ancestor before ReorgError re-enters here,
-  // so rebuilding + rehydrating the projector caches from those records keeps
-  // them exactly at the resume cursor (no orphaned-branch ghosts, no facts lost
-  // to a restart). Fail-open: a hydration error starts with empty caches —
-  // today's behavior — rather than blocking boot. No-op unless flag + creds are
-  // set; announcements/pushes stay gated on isCaughtUp.
-  const notifCaches =
-    env.PUBLISH_RESULTS_TO_SUPABASE && env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY && env.STORE_ADDRESS
-      ? await hydrateNotifCachesFromDb(sql, env.STORE_ADDRESS as Hex).catch((e) => {
-          logger.error("notif cache hydration failed; starting with empty caches", {
-            component: "notification-event",
-            error: e instanceof Error ? e.message : String(e),
-          });
-          return emptyCaches();
-        })
-      : emptyCaches();
-  const supabasePush = createSupabasePushAdapter({
-    enabled: env.PUBLISH_RESULTS_TO_SUPABASE,
-    supabaseUrl: env.SUPABASE_URL,
-    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-    isCaughtUp: () => isCaughtUp,
-    projectors: [
-      // Seeded from the same snapshot as the sibling — independent copies,
-      // because this projector consumes (deletes) its duel ids.
-      createTourneyAnnouncementProjector({
-        bracketById: new Map(notifCaches.bracketById),
-        knownDuelIds: new Set(notifCaches.duelPlayersById.keys()),
-      }),
-      createNotificationEventProjector(notifCaches),
-    ],
-  });
-
   const { storageAdapter, tables } = await createStorageAdapter({ ...clientOptions, database });
 
   const loggingAdapter = createLoggingStorageAdapter(storageAdapter, logger);

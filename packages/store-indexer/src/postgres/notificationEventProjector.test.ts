@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { concatHex, numberToHex, type Hex } from "viem";
 import { resourceToHex } from "@latticexyz/common";
 import type { StorageAdapterLog } from "@latticexyz/store-sync";
@@ -7,8 +7,11 @@ import {
   emptyCaches,
   extractNotifEvents,
   filterToSubscribed,
+  hydrateNotifCaches,
   unpackIndices,
+  type HydrationRecords,
   type NotifEvent,
+  type SetRecord,
 } from "./notificationEventProjector";
 
 const CORE = resourceToHex({ type: "table", namespace: "app", name: "TaruchiCore" });
@@ -74,6 +77,18 @@ function tourneyEnrollLog(id: bigint, bracket: number, packedPlayers: bigint): S
 function tourneyResultLog(id: bigint): StorageAdapterLog {
   return mkSetRecord(TOURNEY_RESULT, id, concatHex([numberToHex(0n, { size: 32 }), numberToHex(0, { size: 4 })]));
 }
+
+// Hydration consumes SetRecord ({ keyTuple, staticData }), not StorageAdapterLog — pull
+// .args off the log helpers above so both paths share one staticData layout per table.
+function toSetRecord(l: StorageAdapterLog): SetRecord {
+  const { keyTuple, staticData } = (l as unknown as { args: SetRecord }).args;
+  return { keyTuple, staticData };
+}
+const coreRec = (id: bigint, owner: Hex, index: number): SetRecord => toSetRecord(coreLog(id, owner, index));
+const statusRec = (id: bigint, state: number): SetRecord => toSetRecord(statusLog(id, state));
+const duelRec = (id: bigint, a: number, b: number): SetRecord => toSetRecord(duelEnrollLog(id, a, b));
+const tourneyRec = (id: bigint, bracket: number, packedPlayers: bigint): SetRecord =>
+  toSetRecord(tourneyEnrollLog(id, bracket, packedPlayers));
 
 function packPlayers(...idx: number[]): bigint {
   let p = 0n;
@@ -177,6 +192,98 @@ describe("extractNotifEvents — FESTIVAL", () => {
     c.ownerByIndex.set(10, OWNER_A);
     extractNotifEvents([tourneyEnrollLog(6000n, 2, packPlayers(10))], c, 1); // bracket 2 = Veteran
     expect(extractNotifEvents([tourneyResultLog(6000n)], c, 2)).toEqual([]);
+  });
+});
+
+describe("hydrateNotifCaches", () => {
+  it("hydrated duel enroll + owners: a post-restart TourneyResult notifies both players", () => {
+    const records: HydrationRecords = {
+      core: [coreRec(100n, OWNER_A, 10), coreRec(200n, OWNER_B, 20)],
+      status: [],
+      duels: [duelRec(999n, 10, 20)],
+      tourneys: [],
+    };
+    const { caches: c } = hydrateNotifCaches(records);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const ev = extractNotifEvents([tourneyResultLog(999n)], c, 2);
+    writeSpy.mockRestore();
+    expect(ev).toEqual([
+      { type: "duel", recipient_wallet: OWNER_A, taruchi_id: "999" },
+      { type: "duel", recipient_wallet: OWNER_B, taruchi_id: "999" },
+    ]);
+    // subsumes spec test 5: the duel is known via hydration, so no result-unknown-id warn.
+    const warnedUnknown = writeSpy.mock.calls.some(([line]) => String(line).includes("result-unknown-id"));
+    expect(warnedUnknown).toBe(false);
+  });
+
+  it("hydrated festival enroll + owners: a post-restart result notifies every entrant", () => {
+    const records: HydrationRecords = {
+      core: [coreRec(100n, OWNER_A, 10), coreRec(200n, OWNER_B, 20)],
+      status: [],
+      duels: [],
+      tourneys: [tourneyRec(5000n, 5, packPlayers(10, 20))], // bracket 5 = festival
+    };
+    const { caches: c } = hydrateNotifCaches(records);
+    const ev = extractNotifEvents([tourneyResultLog(5000n)], c, 3);
+    expect(ev).toEqual(
+      expect.arrayContaining([
+        { type: "festival", recipient_wallet: OWNER_A, taruchi_id: "5000" },
+        { type: "festival", recipient_wallet: OWNER_B, taruchi_id: "5000" },
+      ]),
+    );
+    expect(ev).toHaveLength(2);
+  });
+
+  it("seeds lastStateById so a post-restart IDLE Status write is not a false mint", () => {
+    const records: HydrationRecords = {
+      core: [coreRec(1n, OWNER_A, 10)],
+      status: [statusRec(1n, IDLE)],
+      duels: [],
+      tourneys: [],
+    };
+    const { caches: c } = hydrateNotifCaches(records);
+    expect(extractNotifEvents([statusLog(1n, IDLE)], c, 5)).toEqual([]);
+  });
+
+  it("returns caches only and fires nothing without a result log", () => {
+    const records: HydrationRecords = {
+      core: [coreRec(100n, OWNER_A, 10), coreRec(200n, OWNER_B, 20)],
+      status: [],
+      duels: [duelRec(999n, 10, 20)],
+      tourneys: [],
+    };
+    const { caches: c } = hydrateNotifCaches(records);
+    // extractNotifEvents unconditionally sets caches.lastBlock — assert BEFORE calling it.
+    expect(c.lastBlock).toBe(-1);
+    expect(extractNotifEvents([], c, 1)).toEqual([]);
+  });
+
+  it("skips static_data rows shorter than the required offsets and reports the skipped count", () => {
+    const validCore = coreRec(1n, OWNER_A, 10);
+    const shortCore: SetRecord = { keyTuple: coreRec(2n, OWNER_B, 99).keyTuple, staticData: "0x00" as Hex };
+    const validTourney = tourneyRec(5000n, 5, packPlayers(10, 20));
+    const shortTourney: SetRecord = {
+      keyTuple: tourneyRec(7000n, 5, packPlayers(10)).keyTuple,
+      staticData: "0x00" as Hex,
+    };
+    const records: HydrationRecords = {
+      core: [validCore, shortCore],
+      status: [],
+      duels: [],
+      tourneys: [validTourney, shortTourney],
+    };
+    const { caches, skipped } = hydrateNotifCaches(records);
+    expect(caches.ownerById.has("1")).toBe(true);
+    expect(caches.ownerById.has("2")).toBe(false);
+    expect(caches.bracketById.has("5000")).toBe(true);
+    expect(caches.bracketById.has("7000")).toBe(false);
+    expect(skipped).toBe(2);
+  });
+
+  it("hydrates empty record sets to empty-equivalent caches with no skips", () => {
+    const { caches, skipped } = hydrateNotifCaches({ core: [], status: [], duels: [], tourneys: [] });
+    expect(caches).toEqual(emptyCaches());
+    expect(skipped).toBe(0);
   });
 });
 

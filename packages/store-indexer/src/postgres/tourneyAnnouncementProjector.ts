@@ -172,17 +172,25 @@ async function publishToSupabase(
  * never by polling the DB. Mirrors `tournament_results` always; announces only
  * once the indexer has caught up so historical backfill doesn't spam chat.
  */
-export function createTourneyAnnouncementProjector(): Projector {
+export function createTourneyAnnouncementProjector(seed?: {
+  bracketById?: Map<string, number>;
+  knownDuelIds?: Set<string>;
+}): Projector {
   // id → bracket, learned from Tourney enroll writes. Persisted across blocks
   // (enroll precedes resolve) and never pruned: a reorg may replay only the
   // resolve block, so we must keep brackets for already-enrolled tourneys.
-  const bracketById = new Map<string, number>();
+  // Copied (not aliased) from the optional seed so the caller's map stays
+  // independently mutable after construction.
+  const bracketById = new Map(seed?.bracketById);
   // Duel ids learned from Duel enroll writes, consumed when their TourneyResult
   // lands. Deliberately the opposite retention to bracketById (and to the
   // sibling's never-pruned duelPlayersById): duels emit no announcement, so a
   // resolved duel's id is dead weight, and a reorg replaying a pruned duel
-  // resolve costs at most one warn before skipping correctly.
-  const knownDuelIds = new Set<string>();
+  // resolve costs at most one warn before skipping correctly. A seeded id may
+  // already be resolved on-chain (bounded, same never-pruned posture as the
+  // sibling's duelPlayersById until its result is next seen). Copied from the
+  // optional seed for the same independence reason as bracketById.
+  const knownDuelIds = new Set(seed?.knownDuelIds);
 
   return {
     name: "tourney-announcement",

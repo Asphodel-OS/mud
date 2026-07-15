@@ -1,13 +1,16 @@
+import type { Sql } from "postgres";
 import { resourceToHex } from "@latticexyz/common";
 import { type SupabaseClient } from "@supabase/supabase-js";
-import { type Hex, hexToBigInt, sliceHex } from "viem";
+import { type Hex, hexToBigInt, size, sliceHex } from "viem";
 import { StorageAdapterLog } from "@latticexyz/store-sync";
 import { logger } from "../logger";
 import {
   type Projector,
   type ProjectorContext,
   type SetRecord,
+  fetchSetRecords,
   keyToId,
+  mudRecordsTableExists,
   readStaticUint,
   setRecordsFor,
 } from "./supabasePush";
@@ -69,6 +72,13 @@ const DUEL_B_OFFSET = 4;
 const TOURNEY_PLAYERS_OFFSET = 0;
 const TOURNEY_BRACKET_OFFSET = 56;
 
+// Minimum static_data BYTE length per table for hydration's malformed-row guard
+// (see hydrateNotifCaches) — one past the last offset each learn* helper reads.
+const MIN_CORE_BYTES = 24; // owner @4, len 20
+const MIN_STATUS_BYTES = 2; // state @1, len 1
+const MIN_DUEL_BYTES = 8; // playerB @4, len 4
+const MIN_TOURNEY_BYTES = 57; // bracket @56, len 1
+
 /** Read a fixed-length address field as a lowercase 0x-hex string. */
 function readAddress(staticData: Hex, offset: number): string {
   return sliceHex(staticData, offset, offset + 20).toLowerCase();
@@ -100,9 +110,11 @@ export type NotifCaches = {
   /** The previous block processed — used to detect a reorg replay (block
    *  regresses below it exactly once, at the boundary). NOT a high-water max:
    *  tracking the last block means subsequent replayed blocks climb forward and
-   *  don't re-trigger the gate clear. The indexer recovers from ReorgError
-   *  in-process (no restart), so caches persist; without this, lastStateById
-   *  would silence a legit re-revealed mint after a reorg. -1 = none yet. */
+   *  don't re-trigger the gate clear. Since projectors are rebuilt and
+   *  rehydrated from the rolled-back mud.records on every sync attempt (see
+   *  hydrateNotifCachesFromDb), a ReorgError restart already resets this gate —
+   *  the in-extract check remains as belt-and-suspenders for any replay that
+   *  reaches a live projector. -1 = none yet. */
   lastBlock: number;
 };
 
@@ -123,6 +135,137 @@ export type NotifEvent = {
   recipient_wallet: string; // lowercase
   taruchi_id: string; // the taru/duel/tourney id this event is about
 };
+
+// The single decode site for these three tables — shared by the live log path
+// (extractNotifEvents) and the hydration path (hydrateNotifCaches), so their
+// byte offsets cannot drift apart.
+function learnCore(rec: SetRecord, caches: NotifCaches): void {
+  const id = keyToId(rec);
+  const owner = readAddress(rec.staticData, CORE_OWNER_OFFSET);
+  const index = readStaticUint(rec.staticData, CORE_INDEX_OFFSET, 4);
+  caches.ownerById.set(id, owner);
+  if (index !== 0) caches.ownerByIndex.set(index, owner);
+}
+
+function learnDuelEnroll(rec: SetRecord, caches: NotifCaches): void {
+  caches.duelPlayersById.set(keyToId(rec), [
+    readStaticUint(rec.staticData, DUEL_A_OFFSET, 4),
+    readStaticUint(rec.staticData, DUEL_B_OFFSET, 4),
+  ]);
+}
+
+function learnTourneyEnroll(rec: SetRecord, caches: NotifCaches): void {
+  const id = keyToId(rec);
+  caches.bracketById.set(id, readStaticUint(rec.staticData, TOURNEY_BRACKET_OFFSET, 1));
+  caches.playersById.set(
+    id,
+    hexToBigInt(sliceHex(rec.staticData, TOURNEY_PLAYERS_OFFSET, TOURNEY_PLAYERS_OFFSET + 32)),
+  );
+}
+
+export type HydrationRecords = {
+  core: SetRecord[];
+  status: SetRecord[];
+  duels: SetRecord[];
+  tourneys: SetRecord[];
+};
+
+/**
+ * Pure: rebuild caches from the current `mud.records` snapshot on boot (see
+ * hydrateNotifCachesFromDb), so a restart doesn't lose owner/enroll/mint-seen
+ * facts taught by pre-restart blocks. Runs the same learn* helpers the live log
+ * path uses, so decode offsets can't drift between the two paths. `lastBlock`
+ * stays at -1 — the first live block establishes it, and the in-extract reorg
+ * gate is unaffected by hydration.
+ *
+ * Single-writer invariant: `mud.records` and the resume cursor commit
+ * atomically per block, and this indexer is the DB's only writer (the reorg
+ * loop is in-process), so "hydrated state ≤ resume cursor" holds without a
+ * shared snapshot between hydration and the cursor read.
+ *
+ * Resolved-but-not-deleted duels/tourneys can linger in the seed — same
+ * never-pruned posture `duelPlayersById`/`bracketById` already have on the log
+ * path. Deleted records are excluded by the caller's query (fetchSetRecords),
+ * which the live log path has no equivalent for (it never sees deletes) — so a
+ * deleted-then-resolved row skips post-restart instead of dead-pushing, the
+ * safer of the two for a best-effort one-shot notification.
+ */
+export function hydrateNotifCaches(records: HydrationRecords): { caches: NotifCaches; skipped: number } {
+  const caches = emptyCaches();
+  let skipped = 0;
+
+  // Raw storage can birth a row with short static_data (e.g. a Store_SpliceStaticData
+  // on a previously-absent record, prev "0x"), which sliceHex would throw on — skip +
+  // count instead of failing open the whole hydration. The live log path never sees
+  // these (a real SetRecord always carries a full row), so the guard lives here only.
+  for (const rec of records.core) {
+    if (size(rec.staticData) < MIN_CORE_BYTES) {
+      skipped++;
+      continue;
+    }
+    learnCore(rec, caches);
+  }
+  for (const rec of records.duels) {
+    if (size(rec.staticData) < MIN_DUEL_BYTES) {
+      skipped++;
+      continue;
+    }
+    learnDuelEnroll(rec, caches);
+  }
+  for (const rec of records.tourneys) {
+    if (size(rec.staticData) < MIN_TOURNEY_BYTES) {
+      skipped++;
+      continue;
+    }
+    learnTourneyEnroll(rec, caches);
+  }
+  // Seed the mint-seen gate only — never emit a mint event here. This loop is
+  // separate from the learn* helpers (no extractable helper: the log path's
+  // mint decode is entangled with emit logic in extractNotifEvents), so it's
+  // kept in sync by reading the same STATUS_STATE_OFFSET constant, not shared
+  // code. A skipped short TaruchiStatus row leaves that id out of
+  // lastStateById, so the false-mint gate stays unseeded for that one id
+  // (negligible — real Status rows are always ≥2 bytes — and accepted).
+  for (const rec of records.status) {
+    if (size(rec.staticData) < MIN_STATUS_BYTES) {
+      skipped++;
+      continue;
+    }
+    caches.lastStateById.set(keyToId(rec), readStaticUint(rec.staticData, STATUS_STATE_OFFSET, 1));
+  }
+
+  return { caches, skipped };
+}
+
+/**
+ * Boot-time entry point: one read-only transaction over the four hydrated
+ * tables so they come from a single `mud.records` snapshot (no intra-hydration
+ * skew), then the pure rebuild above. Called at the top of every sync attempt —
+ * including after a reorg rollback, where the records already reflect the
+ * common ancestor. Fail-open is the CALLER's job (catch → emptyCaches()); this
+ * only fail-opens the first-boot case where `mud.records` doesn't exist yet.
+ */
+export async function hydrateNotifCachesFromDb(sql: Sql, storeAddress: Hex): Promise<NotifCaches> {
+  const records: HydrationRecords = await sql.begin("read only", async (tx) => {
+    if (!(await mudRecordsTableExists(tx))) return { core: [], status: [], duels: [], tourneys: [] };
+    const [core, status, duels, tourneys] = await Promise.all([
+      fetchSetRecords(tx, storeAddress, TARUCHI_CORE_TABLE_ID),
+      fetchSetRecords(tx, storeAddress, TARUCHI_STATUS_TABLE_ID),
+      fetchSetRecords(tx, storeAddress, DUEL_TABLE_ID),
+      fetchSetRecords(tx, storeAddress, TOURNEY_TABLE_ID),
+    ]);
+    return { core, status, duels, tourneys };
+  });
+  const { caches, skipped } = hydrateNotifCaches(records);
+  log.info("caches hydrated from mud.records", {
+    owners: caches.ownerByIndex.size,
+    duels: caches.duelPlayersById.size,
+    tourneys: caches.bracketById.size,
+    statuses: caches.lastStateById.size,
+    skipped,
+  });
+  return caches;
+}
 
 /**
  * Pure: decode the notifiable resolutions in this block, mutating `caches`.
@@ -149,30 +292,12 @@ export function extractNotifEvents(
   caches.lastBlock = blockNumber;
 
   // 1) Learn owners (TaruchiCore is written at mint/reroll, before any resolve).
-  for (const rec of setRecordsFor(logs, TARUCHI_CORE_TABLE_ID)) {
-    const id = keyToId(rec);
-    const owner = readAddress(rec.staticData, CORE_OWNER_OFFSET);
-    const index = readStaticUint(rec.staticData, CORE_INDEX_OFFSET, 4);
-    caches.ownerById.set(id, owner);
-    if (index !== 0) caches.ownerByIndex.set(index, owner);
-  }
+  for (const rec of setRecordsFor(logs, TARUCHI_CORE_TABLE_ID)) learnCore(rec, caches);
   // Learn duel player indices from the enroll SetRecord (resolve is a splice we
   // don't see — we trigger off the TourneyResult write instead).
-  for (const rec of setRecordsFor(logs, DUEL_TABLE_ID)) {
-    caches.duelPlayersById.set(keyToId(rec), [
-      readStaticUint(rec.staticData, DUEL_A_OFFSET, 4),
-      readStaticUint(rec.staticData, DUEL_B_OFFSET, 4),
-    ]);
-  }
+  for (const rec of setRecordsFor(logs, DUEL_TABLE_ID)) learnDuelEnroll(rec, caches);
   // Learn festival bracket + entrants from the Tourney enroll SetRecord.
-  for (const rec of setRecordsFor(logs, TOURNEY_TABLE_ID)) {
-    const id = keyToId(rec);
-    caches.bracketById.set(id, readStaticUint(rec.staticData, TOURNEY_BRACKET_OFFSET, 1));
-    caches.playersById.set(
-      id,
-      hexToBigInt(sliceHex(rec.staticData, TOURNEY_PLAYERS_OFFSET, TOURNEY_PLAYERS_OFFSET + 32)),
-    );
-  }
+  for (const rec of setRecordsFor(logs, TOURNEY_TABLE_ID)) learnTourneyEnroll(rec, caches);
 
   const events: NotifEvent[] = [];
   const warnMiss = (what: string, key: string | number): void => {
@@ -316,8 +441,8 @@ async function publish(supabase: SupabaseClient, events: NotifEvent[], blockNumb
   return rows.length;
 }
 
-export function createNotificationEventProjector(): Projector {
-  const caches = emptyCaches();
+export function createNotificationEventProjector(initialCaches: NotifCaches = emptyCaches()): Projector {
+  const caches = initialCaches;
   return {
     name: "notification-event",
     onBlock: async (logs: readonly StorageAdapterLog[], ctx: ProjectorContext): Promise<void> => {
